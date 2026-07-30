@@ -1,0 +1,4 @@
+{
+  "tokenizer": { "type": "sha256", "encoding": "raster", "commitment": "1463a243226503380a3ecc9ca4e7c833979b622d74a48873829548326b2b063d" },
+  "initial_pieces": { "type": "sha256", "encoding": "raster", "commitment": "06d581356d7a32bc4fe8b1be3520de2f42096e580c31bf3c421b61c285c6dbc1" }
+}

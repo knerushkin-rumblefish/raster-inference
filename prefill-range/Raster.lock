@@ -1,0 +1,42 @@
+{
+  "format": 1,
+  "program_commitment": "653c04779f0b5d88d4b363ea38cc2314c5b7ebdbe4f99ae15dd2a8a53e1902b9",
+  "tiles": {
+    "apply_mlp": {
+      "image_id": "c9403b68c48695736e76a15e3b475db6e3e2ef8f048a38ff5d469b60484c1a53",
+      "source_hash": "f6986c7f450e07470000000000003f7b"
+    },
+    "assert_layer_complete": {
+      "image_id": "0fec223f454b276f70aa849521f2675d50545b8fd4cf9209a598d88fa62e2fa3",
+      "source_hash": "f6986c7f450e07470000000000003f7b"
+    },
+    "attend_kv_chunk": {
+      "image_id": "bac98ec58c0779d14ab4628fcceee8cdbe7bfe72aa717d38688fe73db7cdbacd",
+      "source_hash": "f6986c7f450e07470000000000003f7b"
+    },
+    "begin_attention": {
+      "image_id": "1fd125a03338607ce68fdce935f30514d499e8c9f016c4b39994a6f6f9335e10",
+      "source_hash": "f6986c7f450e07470000000000003f7b"
+    },
+    "finish_attention": {
+      "image_id": "dc63e184b497385eda4b3a74bd18715bf5b8d5e1cbbae47bf740a44aecb085dd",
+      "source_hash": "f6986c7f450e07470000000000003f7b"
+    },
+    "project_qkv_row": {
+      "image_id": "d450af10f2c075b5188effac38d5f0df8200832bfe5c9a963e62cce857525b1a",
+      "source_hash": "f6986c7f450e07470000000000003f7b"
+    },
+    "summarise_errors": {
+      "image_id": "fb83eb22d9c0361ccbecdaf833829cfa59bef793e78d60e59854c66c9c1d22e0",
+      "source_hash": "f6986c7f450e07470000000000003f7b"
+    },
+    "validate_layer_params": {
+      "image_id": "0384ec2046485914956347e3d8c93221b6fe316294d42db0a9895a574bebd530",
+      "source_hash": "f6986c7f450e07470000000000003f7b"
+    }
+  },
+  "toolchain": {
+    "risc0": "risc0-zkvm-1.2",
+    "build_mode": "local"
+  }
+}

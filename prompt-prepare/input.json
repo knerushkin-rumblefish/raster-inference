@@ -1,0 +1,4 @@
+{
+  "tokenizer": { "path": "tokenizer.rastered", "index_path": "tokenizer.rindex", "load_preference": "read" },
+  "initial_pieces": { "path": "initial_pieces.rastered", "index_path": "initial_pieces.rindex", "load_preference": "read" }
+}

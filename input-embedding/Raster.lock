@@ -1,0 +1,30 @@
+{
+  "format": 1,
+  "program_commitment": "b589768bf27a456eb98e5308a5bb23aee75e45438adc47fdaf276b1184e8e572",
+  "tiles": {
+    "append_activation_row": {
+      "image_id": "49fede3114aa81d3c63589d48c2b6fae590f29b757d065b24fce4c37229318a3",
+      "source_hash": "de7e0421b63432ce0000000000000f86"
+    },
+    "assert_all_tokens_embedded": {
+      "image_id": "1da225e88803b1426fa5830569c38c0d6e1cb76d7f710ae63eb8c936bf6252e8",
+      "source_hash": "de7e0421b63432ce0000000000000f86"
+    },
+    "begin_row_lookup": {
+      "image_id": "979378c7465fd329ecabedd7d9e87d5d2da5f2fc3aecf37641f0feb0ecc54b5a",
+      "source_hash": "de7e0421b63432ce0000000000000f86"
+    },
+    "scan_embedding_rows": {
+      "image_id": "5f28ce8b2f241e769df86d254e3920834a2f366987dbdab50b3bea888432c29f",
+      "source_hash": "de7e0421b63432ce0000000000000f86"
+    },
+    "summarise_errors": {
+      "image_id": "0375c3d36b2ed58b660a610badbfaa56dddcd6748ad3140cdbf5bb5e7426eb68",
+      "source_hash": "de7e0421b63432ce0000000000000f86"
+    }
+  },
+  "toolchain": {
+    "risc0": "risc0-zkvm-1.2",
+    "build_mode": "local"
+  }
+}

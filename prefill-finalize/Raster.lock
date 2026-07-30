@@ -1,0 +1,38 @@
+{
+  "format": 1,
+  "program_commitment": "7f7ea577061a25270ce032c28e4c3f851b37cb223fc0d0dabcb73a73b0f6e5aa",
+  "tiles": {
+    "assert_logits_complete": {
+      "image_id": "45420841526510bf5d9bb343a66941bb890cb41459a5913fb1215d905ba78fd6",
+      "source_hash": "75ecdcc580a3c3540000000000001844"
+    },
+    "begin_logits": {
+      "image_id": "c06a0192c61222898a4f204ce4c1d004ba3cf6f7e834057e5865677b896d1667",
+      "source_hash": "75ecdcc580a3c3540000000000001844"
+    },
+    "normalize_final_position": {
+      "image_id": "aef57edfe29ff14c5cc0c524085ee81c17b4d66d32ba1458ee57756baaf4f76b",
+      "source_hash": "75ecdcc580a3c3540000000000001844"
+    },
+    "project_logit_chunk": {
+      "image_id": "2b67049187e4db65adadb697d20a90ea69eeb4a93493adc6ff20d2a44fed9172",
+      "source_hash": "75ecdcc580a3c3540000000000001844"
+    },
+    "summarise_errors": {
+      "image_id": "79beb2f1c9aec4741daf8eb87cc37d83df10b4d8cf704161cdf5ee323f901650",
+      "source_hash": "75ecdcc580a3c3540000000000001844"
+    },
+    "track_final_position": {
+      "image_id": "131542a3ba2dfb4897b6c92a50c9b700028ce4cc620f02a9190ebfcb137bc43c",
+      "source_hash": "75ecdcc580a3c3540000000000001844"
+    },
+    "validate_final_head": {
+      "image_id": "a29abc29394d29b4a8fe5d52b74a28f5dc4524354c0bbc888a8b9834f26b99d1",
+      "source_hash": "75ecdcc580a3c3540000000000001844"
+    }
+  },
+  "toolchain": {
+    "risc0": "risc0-zkvm-1.2",
+    "build_mode": "local"
+  }
+}
