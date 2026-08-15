@@ -1,8 +1,8 @@
 [package]
-name = "prefill-range"
+name = "decode-select-token"
 version = "0.1.0"
 edition = "2021"
-default-run = "prefill-range"
+default-run = "decode-select-token"
 
 [features]
 default = ["std"]
@@ -12,6 +12,3 @@ profiling = ["raster/profiling"]
 [dependencies]
 raster = { path = "../../../raster/crates/raster", default-features = false }
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
-# Canonical fixed-point kernels, vendored verbatim from the reference
-# implementation and held to bit-equality by `det-num/tests/equivalence.rs`.
-det-num = { path = "../det-num" }

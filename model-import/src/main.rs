@@ -41,35 +41,77 @@ fn main() {
 struct Args {
     model_dir: PathBuf,
     prompt: String,
+    /// Rewrite only the tokenizer externals, leaving the weight externals
+    /// alone. The weights are ~9 GB and depend on nothing the tokenizer
+    /// touches, so a prompt or vocabulary-layout change has no reason to
+    /// re-emit them. Prints only the `prompt_prepare` stage.
+    only_tokenizer: bool,
+    /// Rewrite only the transformer-layer externals (`prefill-range`). Nothing
+    /// else depends on `LayerParams`, so a per-layer shape correction has no
+    /// reason to re-emit the ~11 GB of tokenizer, embedding, PLE and head
+    /// artifacts. Prints only the `prefill_range_*` stages.
+    only_layers: bool,
 }
 
 fn parse_args() -> Result<Args, Box<dyn Error>> {
     let mut model_dir = None;
     let mut prompt = String::from("hello raster");
+    let mut only_tokenizer = false;
+    let mut only_layers = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--model" => model_dir = args.next().map(PathBuf::from),
             "--prompt" => prompt = args.next().ok_or("--prompt needs a value")?,
+            "--only-tokenizer" => only_tokenizer = true,
+            "--only-layers" => only_layers = true,
             other => return Err(format!("unknown argument '{other}'").into()),
         }
     }
     Ok(Args {
         model_dir: model_dir.ok_or("--model <bundle-dir> is required")?,
         prompt,
+        only_tokenizer,
+        only_layers,
     })
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
     let args = parse_args()?;
+    let tokenizer: serde_json::Value =
+        serde_json::from_slice(&fs::read(args.model_dir.join("tokenizer.json"))?)?;
+
+    if args.only_tokenizer {
+        let mut stages = Vec::new();
+        write_tokenizer(&tokenizer, &args.prompt, &mut stages)?;
+        println!();
+        println!("# ---- replaces the prompt_prepare stage in the root Raster.toml ----");
+        for stage in &stages {
+            println!();
+            print!("{stage}");
+        }
+        return Ok(());
+    }
+
     let weights = detwgt::load(&args.model_dir.join("model.detwgt"))?;
     let config: serde_json::Value =
         serde_json::from_slice(&fs::read(args.model_dir.join("config.json"))?)?;
-    let tokenizer: serde_json::Value =
-        serde_json::from_slice(&fs::read(args.model_dir.join("tokenizer.json"))?)?;
     let text = config
         .get("text_config")
         .ok_or("config.json has no text_config")?;
+
+    if args.only_layers {
+        let shape = Shape::from_config(text)?;
+        let mut stages = Vec::new();
+        write_transformer_layers(&weights, &shape, &mut stages)?;
+        println!();
+        println!("# ---- replaces the prefill_range_* stages in the root Raster.toml ----");
+        for stage in &stages {
+            println!();
+            print!("{stage}");
+        }
+        return Ok(());
+    }
 
     let shape = Shape::from_config(text)?;
     println!(
@@ -99,6 +141,19 @@ fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn as_f64(value: &serde_json::Value) -> Option<f64> {
+    value.as_f64()
+}
+
+/// One key out of `rope_parameters.<attention_type>`, which is where Gemma 3n
+/// puts its per-family RoPE settings.
+fn rope_param(text: &serde_json::Value, attention_type: &str, key: &str) -> Option<f64> {
+    text.get("rope_parameters")?
+        .get(attention_type)?
+        .get(key)
+        .and_then(as_f64)
+}
+
 /// The shapes every stage needs, read from `config.json`.
 struct Shape {
     hidden: usize,
@@ -107,11 +162,93 @@ struct Shape {
     heads: usize,
     kv_heads: usize,
     head_dim: usize,
+    /// Head dim of the *full-attention* ("global") layers, which is not the
+    /// same as `head_dim` on Gemma 3n: E2B declares `head_dim: 256` for the
+    /// sliding layers and `global_head_dim: 512` for the full ones, and the
+    /// weights follow — a full layer's `q_proj` is [heads · 512, hidden] and
+    /// its `q_norm` has 512 values. Defaults to `head_dim` for models that
+    /// declare no such split.
+    global_head_dim: usize,
+    /// RoPE base per attention type, from `rope_parameters`. Gemma 3n gives the
+    /// two families different bases — 10 000 local, 1 000 000 global — so a
+    /// single `rope_theta` would silently detune half the layers.
+    rope_base_sliding: f64,
+    rope_base_full: f64,
+    /// Fraction of a full-attention head that rotates (`0.25` here). Sliding
+    /// layers rotate the whole head.
+    full_partial_rotary_factor: f64,
+    /// How many trailing layers borrow their K/V from an earlier donor.
+    num_kv_shared_layers: usize,
     vocab: usize,
     ple_width: usize,
     sliding_window: u32,
     layer_types: Vec<String>,
     norm_eps: i64,
+}
+
+impl Shape {
+    fn is_sliding(&self, idx: usize) -> bool {
+        matches!(
+            self.layer_types.get(idx).map(String::as_str),
+            Some("sliding_attention")
+        )
+    }
+
+    /// Head dim of layer `idx` — `global_head_dim` for a full-attention layer,
+    /// `head_dim` for a sliding one.
+    fn head_dim_at(&self, idx: usize) -> usize {
+        if self.is_sliding(idx) {
+            self.head_dim
+        } else {
+            self.global_head_dim
+        }
+    }
+
+    /// The layer whose K/V cache layer `idx` borrows, or `-1` if it computes
+    /// its own.
+    ///
+    /// Mirrors `casettek/.../shared/model/gemma/io.rs:171` exactly: sharing
+    /// starts at `num_hidden_layers - num_kv_shared_layers`, and a sharing
+    /// layer's donor is the **last layer before that boundary with the same
+    /// attention type**. For this model that resolves to layer 13 for every
+    /// sliding layer and layer 14 for every full one — 20 layers in all, which
+    /// is the count the config declares.
+    fn kv_donor_layer(&self, idx: usize) -> i32 {
+        let first_shared = self.layers.saturating_sub(self.num_kv_shared_layers);
+        if self.num_kv_shared_layers == 0 || idx < first_shared {
+            return -1;
+        }
+        let Some(attention_type) = self.layer_types.get(idx) else {
+            return -1;
+        };
+        self.layer_types[..first_shared]
+            .iter()
+            .rposition(|candidate| candidate == attention_type)
+            .map(|donor| donor as i32)
+            .unwrap_or(-1)
+    }
+
+    /// RoPE parameters for layer `idx`: `(base_bits, rotary_dim, freq_base_dim)`.
+    ///
+    /// `base_bits` is the base as `Acc` (Q32.32) bits. Both bases this model
+    /// declares are exact integers, so the encoding is a plain shift — asserted
+    /// against the reference's `f32_to_acc` in `det-num/tests/equivalence.rs`.
+    ///
+    /// `freq_base_dim` is the layer's `head_dim`, which is *not* `rotary_dim`
+    /// once the rotation is partial: a full-attention head is 512 wide and
+    /// rotates its first 128 lanes against a ladder built over 512.
+    fn rope_at(&self, idx: usize) -> (i64, u32, u32) {
+        let head_dim = self.head_dim_at(idx);
+        let (base, rotary_dim) = if self.is_sliding(idx) {
+            (self.rope_base_sliding, head_dim)
+        } else {
+            (
+                self.rope_base_full,
+                (head_dim as f64 * self.full_partial_rotary_factor) as usize,
+            )
+        };
+        ((base as i64) << 32, rotary_dim as u32, head_dim as u32)
+    }
 }
 
 impl Shape {
@@ -140,6 +277,27 @@ impl Shape {
             heads: usize_at("num_attention_heads")?,
             kv_heads: usize_at("num_key_value_heads")?,
             head_dim: usize_at("head_dim")?,
+            global_head_dim: text
+                .get("global_head_dim")
+                .and_then(serde_json::Value::as_u64)
+                .map(|value| value as usize)
+                .unwrap_or(usize_at("head_dim")?),
+            rope_base_sliding: rope_param(text, "sliding_attention", "rope_theta")
+                .or_else(|| text.get("rope_local_base_freq").and_then(as_f64))
+                .unwrap_or(10_000.0),
+            rope_base_full: rope_param(text, "full_attention", "rope_theta")
+                .or_else(|| text.get("rope_theta").and_then(as_f64))
+                .unwrap_or(1_000_000.0),
+            full_partial_rotary_factor: rope_param(
+                text,
+                "full_attention",
+                "partial_rotary_factor",
+            )
+            .unwrap_or(1.0),
+            num_kv_shared_layers: text
+                .get("num_kv_shared_layers")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as usize,
             vocab: usize_at("vocab_size")?,
             ple_width: usize_at("hidden_size_per_layer_input")?,
             sliding_window: text
@@ -211,10 +369,15 @@ fn write_tokenizer(
     println!("tokenizer: {} entries, {} merges", vocab.len(), merges.len());
     println!("prompt pieces: {pieces:?}");
 
+    let (vocab_bucket_count, vocab_buckets) = bucket_vocab(vocab);
+    let (merge_bucket_count, merge_buckets) = bucket_merges(merges);
+
     let tokenizer_commitment = write_external(
         &PromptTokenizer {
-            vocab: vocab.into(),
-            merges: merges.into(),
+            vocab_bucket_count,
+            merge_bucket_count,
+            vocab_buckets: vocab_buckets.into(),
+            merge_buckets: merge_buckets.into(),
         },
         "prompt-prepare",
         "tokenizer",
@@ -255,6 +418,80 @@ fn write_tokenizer(
         ),
     ));
     Ok(())
+}
+
+/// Entries per bucket to aim for.
+///
+/// This is the knob that trades index size against scan length, and both are
+/// cheap here: each lookup costs one dynamic-index selection plus this many
+/// recur iterations, so 4 keeps a lookup under ~10 replay units while adding
+/// only `len / 4` bucket nodes to the index.
+const TARGET_BUCKET_LOAD: usize = 4;
+
+/// Bucket count for `len` keys: at least one, so the modulus is never zero and
+/// a computed index always has a bucket to land in.
+fn bucket_count_for(len: usize) -> u32 {
+    (len / TARGET_BUCKET_LOAD).max(1) as u32
+}
+
+/// Reports how evenly a bucketing came out — the number the lookup cost is
+/// actually proportional to is the *max*, not the mean.
+fn report_buckets(label: &str, count: u32, sizes: impl Iterator<Item = usize>) {
+    let (mut max, mut used, mut total) = (0usize, 0usize, 0usize);
+    for size in sizes {
+        max = max.max(size);
+        total += size;
+        if size > 0 {
+            used += 1;
+        }
+    }
+    println!(
+        "{label}: {total} keys in {count} buckets · avg {:.1} · max {max} · {} empty",
+        total as f64 / count as f64,
+        count as usize - used,
+    );
+}
+
+fn bucket_vocab(vocab: Vec<TokenEntry>) -> (u32, Vec<VocabBucket>) {
+    let count = bucket_count_for(vocab.len());
+    let mut buckets: Vec<Vec<TokenEntry>> = vec![Vec::new(); count as usize];
+    for entry in vocab {
+        // The same call the tile makes, from the same crate.
+        buckets[vocab_bucket_of(&entry.token, count) as usize].push(entry);
+    }
+    report_buckets("vocab", count, buckets.iter().map(Vec::len));
+    (
+        count,
+        buckets
+            .into_iter()
+            .map(|entries| VocabBucket {
+                entries: entries.into(),
+            })
+            .collect(),
+    )
+}
+
+fn bucket_merges(merges: Vec<BpeMerge>) -> (u32, Vec<MergeBucket>) {
+    let count = bucket_count_for(merges.len());
+    let mut buckets: Vec<Vec<BpeMerge>> = vec![Vec::new(); count as usize];
+    for rule in merges {
+        buckets[merge_bucket_of(&rule.left, &rule.right, count) as usize].push(rule);
+    }
+    // Keep each bucket rank-ordered so the scan's "lowest rank wins" tie-break
+    // sees rules in the same order the flat table presented them.
+    for bucket in &mut buckets {
+        bucket.sort_by_key(|rule| rule.rank);
+    }
+    report_buckets("merges", count, buckets.iter().map(Vec::len));
+    (
+        count,
+        buckets
+            .into_iter()
+            .map(|rules| MergeBucket {
+                rules: rules.into(),
+            })
+            .collect(),
+    )
 }
 
 fn parse_merge(rank: u32, entry: &serde_json::Value) -> Option<BpeMerge> {
@@ -310,19 +547,15 @@ fn write_embedding(
     stages: &mut Vec<String>,
 ) -> Result<(), Box<dyn Error>> {
     let embed = weights.get("model.language_model.embed_tokens.weight")?;
-    let rows = (0..shape.vocab)
-        .map(|token_id| {
-            Ok(EmbeddingRow {
-                token_id: token_id as u32,
-                values_hex: pack_hex(embed.row(token_id)?),
-            })
-        })
-        .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
+    let mut values = Vec::with_capacity(shape.vocab * shape.hidden);
+    for token_id in 0..shape.vocab {
+        values.extend_from_slice(embed.row(token_id)?);
+    }
 
     let commitment = write_external(
         &EmbeddingTable {
             hidden_size: shape.hidden as u32,
-            rows: rows.into(),
+            values: paged_i32s(&values).map_err(|error| error.to_string())?,
         },
         "input-embedding",
         "embedding",
@@ -360,14 +593,6 @@ fn write_ple_layers(
 
         // The packed [vocab, layers · width] table gives this layer its slice.
         let slice = per_layer.column_slice(start, end)?;
-        let embedding_rows = slice
-            .chunks_exact(shape.ple_width)
-            .enumerate()
-            .map(|(token_id, values)| PleEmbeddingRow {
-                token_id: token_id as u32,
-                values_hex: pack_hex(values),
-            })
-            .collect::<Vec<_>>();
 
         let layer = PleLayer {
             params: PleLayerParams {
@@ -381,10 +606,11 @@ fn write_ple_layers(
                 projection_scalar: ONE,
                 input_scale: ONE,
                 norm_eps: shape.norm_eps,
-                projection_hex: pack_hex(&projection.rows(start, end)?),
-                norm_weights_hex: pack_hex(&projection_norm.values),
+                norm_weights: page_of_i32s(&projection_norm.values),
             },
-            embedding_rows: embedding_rows.into(),
+            embeddings: paged_i32s(&slice).map_err(|error| error.to_string())?,
+            projection: paged_i32s(&projection.rows(start, end)?)
+                .map_err(|error| error.to_string())?,
         };
 
         let name = format!("layer{layer_idx}");
@@ -413,6 +639,50 @@ fn write_transformer_layers(
     shape: &Shape,
     stages: &mut Vec<String>,
 ) -> Result<(), Box<dyn Error>> {
+    // Report the two RoPE families once. These are the numbers that silently
+    // decide every attention score, so they are worth seeing rather than
+    // trusting — a wrong base or rotary width produces a plausible-looking run
+    // and the wrong token.
+    for (label, idx) in shape
+        .layer_types
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.as_str(), i))
+        .fold(Vec::new(), |mut seen: Vec<(&str, usize)>, (t, i)| {
+            if !seen.iter().any(|(s, _)| *s == t) {
+                seen.push((t, i));
+            }
+            seen
+        })
+    {
+        let (base, rotary, freq) = shape.rope_at(idx);
+        println!(
+            "rope[{label}]: head_dim {} · rotary_dim {rotary} · freq_base_dim {freq} · base {} (Q32.32 bits {base})",
+            shape.head_dim_at(idx),
+            base >> 32,
+        );
+    }
+
+    // And the KV-sharing map, for the same reason: a wrong donor is not a crash,
+    // it is a layer attending over another layer's keys.
+    let donors: Vec<(usize, i32)> = (0..shape.layers)
+        .map(|idx| (idx, shape.kv_donor_layer(idx)))
+        .filter(|(_, donor)| *donor >= 0)
+        .collect();
+    let mut by_donor: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
+    for (idx, donor) in &donors {
+        by_donor.entry(*donor).or_default().push(*idx);
+    }
+    println!(
+        "kv sharing: {} of {} layers borrow (config declares {})",
+        donors.len(),
+        shape.layers,
+        shape.num_kv_shared_layers
+    );
+    for (donor, borrowers) in &by_donor {
+        println!("  donor layer {donor} -> {borrowers:?}");
+    }
+
     for layer_idx in 0..shape.layers {
         let at = |suffix: &str| format!("model.language_model.layers.{layer_idx}.{suffix}");
         let gate = weights.get(&at("mlp.gate_proj.weight"))?;
@@ -423,6 +693,10 @@ fn write_transformer_layers(
             Some("sliding_attention") => shape.sliding_window,
             _ => 0,
         };
+        // Head dim is per-layer here, not global (see `Shape::global_head_dim`).
+        let head_dim = shape.head_dim_at(layer_idx);
+        let (rope_base, rotary_dim, rope_freq_base_dim) = shape.rope_at(layer_idx);
+        let kv_donor_layer = shape.kv_donor_layer(layer_idx);
         // `attention_k_eq_v` layers store no separate V projection: V *is* K.
         // tiny-gemma-dev emits v_proj only for its sliding layers.
         let w_v = match weights.get(&at("self_attn.v_proj.weight")) {
@@ -435,36 +709,47 @@ fn write_transformer_layers(
             .and_then(|tensor| tensor.values.first().copied())
             .unwrap_or(0);
 
-        let layer = LayerParams {
-            layer_idx: layer_idx as u32,
-            hidden_size: shape.hidden as u32,
-            ffn_size: ffn as u32,
-            num_heads: shape.heads as u32,
-            num_kv_heads: shape.kv_heads as u32,
-            head_dim: shape.head_dim as u32,
-            sliding_window: sliding,
-            attn_scale: inv_sqrt_q16(shape.head_dim),
-            layer_scalar,
-            norm_eps: shape.norm_eps,
-            norm_input_hex: pack_hex(&weights.get(&at("input_layernorm.weight"))?.values),
-            norm_post_attn_hex: pack_hex(
-                &weights.get(&at("post_attention_layernorm.weight"))?.values,
-            ),
-            norm_pre_ffw_hex: pack_hex(
-                &weights.get(&at("pre_feedforward_layernorm.weight"))?.values,
-            ),
-            norm_post_ffw_hex: pack_hex(
-                &weights.get(&at("post_feedforward_layernorm.weight"))?.values,
-            ),
-            q_norm_hex: pack_hex(&weights.get(&at("self_attn.q_norm.weight"))?.values),
-            k_norm_hex: pack_hex(&weights.get(&at("self_attn.k_norm.weight"))?.values),
-            w_q_hex: pack_hex(&weights.get(&at("self_attn.q_proj.weight"))?.values),
-            w_k_hex: pack_hex(&weights.get(&at("self_attn.k_proj.weight"))?.values),
-            w_v_hex: pack_hex(w_v),
-            w_o_hex: pack_hex(&weights.get(&at("self_attn.o_proj.weight"))?.values),
-            w_gate_hex: pack_hex(&gate.values),
-            w_up_hex: pack_hex(&weights.get(&at("mlp.up_proj.weight"))?.values),
-            w_down_hex: pack_hex(&weights.get(&at("mlp.down_proj.weight"))?.values),
+        let layer = TransformerLayer {
+            params: LayerParams {
+                layer_idx: layer_idx as u32,
+                hidden_size: shape.hidden as u32,
+                ffn_size: ffn as u32,
+                num_heads: shape.heads as u32,
+                num_kv_heads: shape.kv_heads as u32,
+                head_dim: head_dim as u32,
+                sliding_window: sliding,
+                attn_scale: inv_sqrt_q16(head_dim),
+                layer_scalar,
+                norm_eps: shape.norm_eps,
+                rope_base,
+                rotary_dim,
+                rope_freq_base_dim,
+                kv_donor_layer,
+                norm_input: page_of_i32s(&weights.get(&at("input_layernorm.weight"))?.values),
+                norm_post_attn: page_of_i32s(
+                    &weights.get(&at("post_attention_layernorm.weight"))?.values,
+                ),
+                norm_pre_ffw: page_of_i32s(
+                    &weights.get(&at("pre_feedforward_layernorm.weight"))?.values,
+                ),
+                norm_post_ffw: page_of_i32s(
+                    &weights.get(&at("post_feedforward_layernorm.weight"))?.values,
+                ),
+                q_norm: page_of_i32s(&weights.get(&at("self_attn.q_norm.weight"))?.values),
+                k_norm: page_of_i32s(&weights.get(&at("self_attn.k_norm.weight"))?.values),
+            },
+            w_q: paged_i32s(&weights.get(&at("self_attn.q_proj.weight"))?.values)
+                .map_err(|error| error.to_string())?,
+            w_k: paged_i32s(&weights.get(&at("self_attn.k_proj.weight"))?.values)
+                .map_err(|error| error.to_string())?,
+            w_v: paged_i32s(w_v).map_err(|error| error.to_string())?,
+            w_o: paged_i32s(&weights.get(&at("self_attn.o_proj.weight"))?.values)
+                .map_err(|error| error.to_string())?,
+            w_gate: paged_i32s(&gate.values).map_err(|error| error.to_string())?,
+            w_up: paged_i32s(&weights.get(&at("mlp.up_proj.weight"))?.values)
+                .map_err(|error| error.to_string())?,
+            w_down: paged_i32s(&weights.get(&at("mlp.down_proj.weight"))?.values)
+                .map_err(|error| error.to_string())?,
         };
 
         let name = format!("layer{layer_idx}");
@@ -474,16 +759,27 @@ fn write_transformer_layers(
         } else {
             format!("prefill_range_l{}", layer_idx - 1)
         };
+        // Every stage of this one program shares `main`'s signature, so every
+        // one needs a `donor_kv` binding. A sharing layer takes its donor's
+        // published cache; the rest take `input_embedding`, whose `kv` is empty
+        // and which the tile ignores anyway (`kv_donor_layer < 0`). Binding a
+        // real earlier stage avoids inventing a synthetic empty external.
+        let donor = match shape.kv_donor_layer(layer_idx) {
+            donor if donor >= 0 => format!("prefill_range_l{donor}"),
+            _ => String::from("input_embedding"),
+        };
         stages.push(format!(
             concat!(
                 "[[chain.stage]]\n",
                 "name = \"prefill_range_l{idx}\"\n",
                 "project = \"prefill-range\"\n",
                 "inputs.activations = {{ from = \"{upstream}\" }}\n",
+                "inputs.donor_kv = {{ from = \"{donor}\" }}\n",
                 "{line}"
             ),
             idx = layer_idx,
             upstream = upstream,
+            donor = donor,
             line = external_line("layer", "prefill-range", &name, &commitment)
         ));
     }
@@ -527,14 +823,10 @@ fn write_head(
         .map(f32_to_q16)
         .unwrap_or(0);
 
-    let rows = (0..shape.vocab)
-        .map(|token_id| {
-            Ok(LogitRow {
-                token_id: token_id as u32,
-                values_hex: pack_hex(projection.row(token_id)?),
-            })
-        })
-        .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
+    let mut rows = Vec::with_capacity(shape.vocab * shape.hidden);
+    for token_id in 0..shape.vocab {
+        rows.extend_from_slice(projection.row(token_id)?);
+    }
 
     let commitment = write_external(
         &FinalHead {
@@ -542,9 +834,11 @@ fn write_head(
                 hidden_size: shape.hidden as u32,
                 norm_eps: shape.norm_eps,
                 softcap,
-                norm_weights_hex: pack_hex(&weights.get("model.language_model.norm.weight")?.values),
+                norm_weights: page_of_i32s(
+                    &weights.get("model.language_model.norm.weight")?.values,
+                ),
             },
-            rows: rows.into(),
+            projection: paged_i32s(&rows).map_err(|error| error.to_string())?,
         },
         "prefill-finalize",
         "head",

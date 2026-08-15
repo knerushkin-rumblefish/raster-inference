@@ -42,16 +42,24 @@ pub fn begin_merge_step(cursor: MergeCursor, piece: String) -> MergeStep {
     }
 }
 
-/// Scans one `Block` of merge rules for `(pending, piece)`, keeping the
-/// lowest-ranked match.
+/// Bucket the current `(pending, piece)` pair hashes to.
 ///
-/// The merge table is the recur `input` — the collection being iterated — and
-/// the step in flight arrives as a small scalar arg. That is the sanctioned
-/// two-collection shape: one replay unit touches one chunk of rules and one
-/// piece, never both collections.
+/// Returned as a `u32` so the sequence can use it as a `select!` index: an
+/// authorized value, hence a lookup a prover cannot steer.
+#[tile(kind = iter, description = "Bucket index for the current merge pair")]
+pub fn merge_bucket_index(step: MergeStep, bucket_count: u32) -> u32 {
+    merge_bucket_of(&step.pending, &step.piece, bucket_count)
+}
+
+/// Scans one merge rule for `(pending, piece)`, keeping the lowest-ranked match.
+///
+/// The `input` is the *bucket's* rule list — the handful of rules whose pair
+/// hashes to the same slot — so a replay unit touches one rule and one piece.
+/// Rules that share a bucket but not the pair are rejected by the equality
+/// test, exactly as they were when this scanned the whole table.
 #[tile(kind = recur, description = "Scan a chunk of merge rules for the current pair")]
 pub fn scan_merge_rules(
-    input: RecurInput<Block<BpeMerge>>,
+    input: RecurInput<BpeMerge>,
     state: RecurState<MergeMatch>,
     step: MergeStep,
 ) -> RecurState<MergeMatch> {
@@ -61,13 +69,12 @@ pub fn scan_merge_rules(
         return state;
     }
 
-    for rule in input.into_value() {
-        let applies = rule.left == step.pending && rule.right == step.piece;
-        if applies && (!state.matched || rule.rank < state.rank) {
-            state.matched = true;
-            state.rank = rule.rank;
-            state.merged = rule.merged;
-        }
+    let rule = input.into_value();
+    let applies = rule.left == step.pending && rule.right == step.piece;
+    if applies && (!state.matched || rule.rank < state.rank) {
+        state.matched = true;
+        state.rank = rule.rank;
+        state.merged = rule.merged;
     }
 
     state
@@ -117,23 +124,29 @@ pub fn begin_vocab_lookup(piece: String) -> VocabQuery {
     VocabQuery { piece }
 }
 
-/// Scans one `Block` of vocabulary entries for the queried piece.
+/// Bucket the queried piece hashes to.
+#[tile(kind = iter, description = "Bucket index for a vocabulary lookup")]
+pub fn vocab_bucket_index(query: VocabQuery, bucket_count: u32) -> u32 {
+    vocab_bucket_of(&query.piece, bucket_count)
+}
+
+/// Scans one vocabulary entry for the queried piece.
 ///
-/// Same shape as [`scan_merge_rules`]: the vocabulary is the iterated
-/// collection, the query is a scalar arg, and the fold state is two small
-/// fields.
+/// Same shape as [`scan_merge_rules`]: the iterated collection is the bucket's
+/// entry list, the query is a scalar arg, and the fold state is two small
+/// fields. A bucket the piece does not occur in — including an empty one —
+/// leaves the initial `found: false`, which is the UNK path.
 #[tile(kind = recur, description = "Scan a chunk of the vocabulary for one piece")]
 pub fn scan_vocab_chunk(
-    input: RecurInput<Block<TokenEntry>>,
+    input: RecurInput<TokenEntry>,
     state: RecurState<VocabMatch>,
     query: VocabQuery,
 ) -> RecurState<VocabMatch> {
     let mut state = state;
-    for entry in input.into_value() {
-        if !state.found && entry.token == query.piece {
-            state.found = true;
-            state.token_id = entry.id;
-        }
+    let entry = input.into_value();
+    if !state.found && entry.token == query.piece {
+        state.found = true;
+        state.token_id = entry.id;
     }
     state
 }

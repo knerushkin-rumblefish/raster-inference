@@ -1,4 +1,4 @@
 {
-  "tokenizer": { "type": "sha256", "encoding": "raster", "commitment": "83a150e50111214e3dc925d36177e0618bfaf7952d5695c9198a956c2c1d056f" },
-  "initial_pieces": { "type": "sha256", "encoding": "raster", "commitment": "06d581356d7a32bc4fe8b1be3520de2f42096e580c31bf3c421b61c285c6dbc1" }
+  "tokenizer": { "type": "sha256", "encoding": "raster", "commitment": "aa9b15cfd910f92b91638a8af385aef31f5166466d7871652946f32575812718" },
+  "initial_pieces": { "type": "sha256", "encoding": "raster", "commitment": "7900ddd18ea891084c9c6396e3ea72870d46006967f6e0365f5cab0d8ca4109b" }
 }

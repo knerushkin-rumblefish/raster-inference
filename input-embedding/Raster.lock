@@ -1,26 +1,30 @@
 {
   "format": 1,
-  "program_commitment": "b589768bf27a456eb98e5308a5bb23aee75e45438adc47fdaf276b1184e8e572",
+  "program_commitment": "f603067ca5ffae2cbed54367dca5f3d2de932180a9493983948ac9b23c93ac2e",
   "tiles": {
     "append_activation_row": {
-      "image_id": "49fede3114aa81d3c63589d48c2b6fae590f29b757d065b24fce4c37229318a3",
-      "source_hash": "de7e0421b63432ce0000000000000f86"
+      "image_id": "50efdf65a4f31f06d041b1fb02e4a98214608d616e561fec085932ddaeb5db22",
+      "source_hash": "101623eaa3ac52b30000000000000b2c"
     },
     "assert_all_tokens_embedded": {
-      "image_id": "1da225e88803b1426fa5830569c38c0d6e1cb76d7f710ae63eb8c936bf6252e8",
-      "source_hash": "de7e0421b63432ce0000000000000f86"
+      "image_id": "7f17f778ffbca4fe38372e0fbea8d76be50172cf2cba1ee081314d96b1f1467b",
+      "source_hash": "101623eaa3ac52b30000000000000b2c"
     },
     "begin_row_lookup": {
-      "image_id": "979378c7465fd329ecabedd7d9e87d5d2da5f2fc3aecf37641f0feb0ecc54b5a",
-      "source_hash": "de7e0421b63432ce0000000000000f86"
+      "image_id": "6a7d7e7a2af606083a7294858338e7c4bba66fe289be0fb0c819b4d7a40da30d",
+      "source_hash": "101623eaa3ac52b30000000000000b2c"
     },
-    "scan_embedding_rows": {
-      "image_id": "5f28ce8b2f241e769df86d254e3920834a2f366987dbdab50b3bea888432c29f",
-      "source_hash": "de7e0421b63432ce0000000000000f86"
+    "embedding_byte_offset": {
+      "image_id": "a078b1cff9aacb10db462160206bde416cb9d440783fe6878caa96cd57cff458",
+      "source_hash": "101623eaa3ac52b30000000000000b2c"
+    },
+    "page_of": {
+      "image_id": "e459eaec4e6f86226055485f0f39af7c0234b4e5183c79fd747c4c1fc93c5de0",
+      "source_hash": "101623eaa3ac52b30000000000000b2c"
     },
     "summarise_errors": {
-      "image_id": "0375c3d36b2ed58b660a610badbfaa56dddcd6748ad3140cdbf5bb5e7426eb68",
-      "source_hash": "de7e0421b63432ce0000000000000f86"
+      "image_id": "ab985583c5b99306700d4aa577649be7b4f123aa19ccb8a9be8770c2836dde3e",
+      "source_hash": "101623eaa3ac52b30000000000000b2c"
     }
   },
   "toolchain": {

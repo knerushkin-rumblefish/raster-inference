@@ -1,23 +1,14 @@
 //! Shared Rastered data types and deterministic numerics for the
 //! `prefill-range` stage.
 //!
-//! # Numerics
-//!
 //! Q16.16 fixed point throughout (`1.0 == 1 << 16`), integer-only so every
-//! tile replays bit-identically in the zkVM (SKILL.md §3). That constraint is
-//! why `exp` here is a polynomial on the fraction bits rather than
-//! `f32::exp`, and why the square root is an integer Newton iteration.
-//!
-//! The kernels mirror the *shape* of `det_kernels::det_layer_prefill`, not its
-//! quantisation. Deliberately not modelled (each would be another dimension to
-//! decompose, and this is a chain example): RoPE, multi-head attention,
-//! sliding windows, KV sharing between layers, and the PLE gate block.
+//! tile replays bit-identically in the zkVM (SKILL.md §3).
 
 extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use raster::List;
+use raster::{Bytes, BytesPage, List};
 use serde::{Deserialize, Serialize};
 
 /// Fractional bits in the Q16.16 representation.
@@ -26,49 +17,45 @@ pub const FRAC_BITS: u32 = 16;
 /// One unit (`1.0`) in Q16.16.
 pub const ONE: i32 = 1 << FRAC_BITS;
 
-/// Number of hex chars one value occupies in a packed vector.
-pub const HEX_CHARS_PER_VALUE: u32 = 8;
+/// Replay-unit page size for every weight matrix in this program.
+pub const PAGE_SIZE: u64 = 196_608;
 
 // ---------------------------------------------------------------------------
-// The pipeline's activation type — shared by every stage that passes
-// activations on. Field-for-field identical in `input-embedding` and
-// `prefill-prepare-aux`: the chain links stages by structural commitment, so
-// a layer's output can only feed the next layer if the shapes match exactly.
+// The pipeline's activation type — field-for-field identical in every stage
+// that passes activations on.
 // ---------------------------------------------------------------------------
 
 /// One prompt position: the token that produced it and its activation row.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
 pub struct ActivationRow {
     pub token_id: u32,
-    pub values_hex: String,
+    pub values: BytesPage,
 }
 
 /// A prompt's activations, in prompt order.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
 pub struct ActivationSequence {
     pub rows: List<ActivationRow>,
     pub errors: List<String>,
+    /// This layer's own K/V cache, carried so a later sharing layer can attend
+    /// over it. Empty on stages that donate to nobody — which is every stage
+    /// except layers 13 and 14 — and ignored by every consumer that is not a
+    /// sharing layer.
+    pub kv: List<KeyRow>,
 }
 
 // ---------------------------------------------------------------------------
 // This stage's own types
 // ---------------------------------------------------------------------------
 
-/// One transformer layer's weights, as this stage's committed external.
-///
-/// Every matrix rides as a packed hex leaf, so the whole layer is
-/// `Materializable` and can be a per-call argument. Row-major throughout:
-/// `w_q_hex` is `hidden_size × hidden_size`, `w_up_hex` is
-/// `ffn_size × hidden_size`, `w_down_hex` is `hidden_size × ffn_size`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+/// Scalars plus the four (plus Q/K) norm vectors. Materializable — legal `args`.
+/// Weight matrices live on [`TransformerLayer`] as `Bytes` regions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
 pub struct LayerParams {
     pub layer_idx: u32,
     pub hidden_size: u32,
     pub ffn_size: u32,
-    /// Query heads. `w_q` is `num_heads · head_dim × hidden_size`.
     pub num_heads: u32,
-    /// Key/value heads — fewer than `num_heads` means grouped-query
-    /// attention: several query heads share one K/V head.
     pub num_kv_heads: u32,
     pub head_dim: u32,
     /// `0` = full attention; otherwise a key is visible only while
@@ -79,76 +66,112 @@ pub struct LayerParams {
     /// Applied to the layer's output row; `0` means "not present".
     pub layer_scalar: i32,
     pub norm_eps: i64,
-    pub norm_input_hex: String,
-    pub norm_post_attn_hex: String,
-    pub norm_pre_ffw_hex: String,
-    pub norm_post_ffw_hex: String,
-    /// Per-head RMS norms applied to Q and K after projection, `head_dim` wide.
-    pub q_norm_hex: String,
-    pub k_norm_hex: String,
-    pub w_q_hex: String,
-    pub w_k_hex: String,
-    pub w_v_hex: String,
-    pub w_o_hex: String,
-    pub w_gate_hex: String,
-    pub w_up_hex: String,
-    pub w_down_hex: String,
+    /// RoPE base as `Acc` (Q32.32) bits — 10 000 on sliding layers, 1 000 000 on
+    /// full-attention ones, from `config.json`'s `rope_parameters`.
+    pub rope_base: i64,
+    /// How many of a head's lanes rotate. The whole head on a sliding layer;
+    /// `head_dim × partial_rotary_factor` (a quarter) on a full-attention one,
+    /// which is what makes Gemma's "partial rotary" partial.
+    pub rotary_dim: u32,
+    /// Denominator dimension of the frequency ladder — always `head_dim`, and
+    /// *not* the same as `rotary_dim` once the rotation is partial.
+    pub rope_freq_base_dim: u32,
+    /// Layer this one borrows K/V from, or `-1` when it computes its own.
+    ///
+    /// Gemma 3n shares KV across its last `num_kv_shared_layers` layers: a
+    /// sharing layer projects only Q and attends over the donor's cache, so it
+    /// never runs `w_k`/`w_v` at all. `-1` rather than `Option` because the
+    /// value crosses a tile boundary and must stay a plain scalar.
+    pub kv_donor_layer: i32,
+    pub norm_input: BytesPage,
+    pub norm_post_attn: BytesPage,
+    pub norm_pre_ffw: BytesPage,
+    pub norm_post_ffw: BytesPage,
+    pub q_norm: BytesPage,
+    pub k_norm: BytesPage,
 }
 
-/// One token's projected attention inputs, plus the residual it will be added
-/// back to. `position` is the index the first pass stamped — a recur *tile*
-/// can read `input.index()`, which is why the projection pass is a tile and
-/// not a sequence.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
-pub struct KvRow {
+/// One transformer layer's committed external.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+pub struct TransformerLayer {
+    pub params: LayerParams,
+    #[page_size = 196_608]
+    pub w_q: Bytes<196_608>,
+    #[page_size = 196_608]
+    pub w_k: Bytes<196_608>,
+    #[page_size = 196_608]
+    pub w_v: Bytes<196_608>,
+    #[page_size = 196_608]
+    pub w_o: Bytes<196_608>,
+    #[page_size = 196_608]
+    pub w_gate: Bytes<196_608>,
+    #[page_size = 196_608]
+    pub w_up: Bytes<196_608>,
+    #[page_size = 196_608]
+    pub w_down: Bytes<196_608>,
+}
+
+/// Key/value side of one token, for the attention scan.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+pub struct KeyRow {
+    pub position: u32,
+    pub k: BytesPage,
+    pub v: BytesPage,
+}
+
+/// Query side of one token, plus the residual it will be added back to.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+pub struct QueryRow {
     pub position: u32,
     pub token_id: u32,
-    pub q_hex: String,
-    pub k_hex: String,
-    pub v_hex: String,
-    pub residual_hex: String,
+    pub q: BytesPage,
+    pub residual: BytesPage,
 }
 
-/// The first pass's result: the whole prompt's Q/K/V.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+/// Pass 1's result: keys and queries as separate lists so the key scan does
+/// not rematerialize query-side fields.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
 pub struct KvSequence {
-    pub rows: List<KvRow>,
+    pub keys: List<KeyRow>,
+    pub queries: List<QueryRow>,
     pub errors: List<String>,
 }
 
-/// The query side of one attention row, materialized once per token.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
-pub struct AttnQuery {
-    pub position: u32,
+/// RMS-normalised activation, ready for Q/K/V matvecs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+pub struct QkvPrep {
     pub token_id: u32,
-    pub q_hex: String,
-    pub residual_hex: String,
+    pub residual: BytesPage,
+    pub normed: BytesPage,
+    pub error: String,
 }
 
-/// Streaming softmax state, carried across the key/value scan — one running
-/// max, sum and weighted accumulator **per head**, packed into hex leaves.
-///
-/// This is the largest recur state in the repo: the accumulator is
-/// `num_heads · head_dim` wide. It is *fixed* width, not growing — the
-/// alternative (collect all scores, then normalise) would need a second list
-/// per token and a second pass over it.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+/// Matvec accumulator: packed output vector plus an error if a page failed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+pub struct ProjAccum {
+    pub values: BytesPage,
+    pub error: String,
+}
+
+/// Streaming softmax state — one running max, sum and weighted accumulator
+/// per head.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
 pub struct AttnState {
     pub started: bool,
-    pub max_hex: String,
-    pub sum_hex: String,
-    pub acc_hex: String,
+    pub max: BytesPage,
+    pub sum: BytesPage,
+    pub acc: BytesPage,
     pub error: String,
 }
 
-/// The attention block's output for one token, before the MLP.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
-pub struct AttnOutput {
-    pub values_hex: String,
+/// A packed vector that may carry a failure from an earlier step.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+pub struct PackedVec {
+    pub values: BytesPage,
     pub error: String,
 }
 
-/// Loop-carried summary of failed rows: how many, and the first message.
+/// Loop-carried summary of failed rows.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
 pub struct ErrorSummary {
     pub count: u32,
@@ -159,48 +182,26 @@ pub struct ErrorSummary {
 // Packing
 // ---------------------------------------------------------------------------
 
-/// Packs Q16.16 values into the hex leaf form: 8 lowercase hex chars each.
-pub fn pack_hex(values: &[i32]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = Vec::with_capacity(values.len() * HEX_CHARS_PER_VALUE as usize);
+pub fn pack_i32s(values: &[i32]) -> BytesPage {
+    let mut bytes = Vec::with_capacity(values.len() * 4);
     for value in values {
-        let bits = *value as u32;
-        for shift in (0..HEX_CHARS_PER_VALUE).rev() {
-            out.push(HEX[((bits >> (shift * 4)) & 0xf) as usize]);
-        }
+        bytes.extend_from_slice(&value.to_le_bytes());
     }
-    String::from_utf8(out).expect("hex packing is always ascii")
+    BytesPage::__from_parts(0, 0, bytes)
 }
 
-/// Decodes a packed vector. Malformed staged data is a committed tile outcome,
-/// never a panic.
-pub fn unpack_hex(packed: &str) -> core::result::Result<Vec<i32>, String> {
-    let bytes = packed.as_bytes();
-    if bytes.len() % HEX_CHARS_PER_VALUE as usize != 0 {
+pub fn unpack_i32s(page: &BytesPage) -> core::result::Result<Vec<i32>, String> {
+    let bytes = page.as_slice();
+    if bytes.len() % 4 != 0 {
         return Err(alloc::format!(
-            "packed vector length {} is not a multiple of {} hex chars",
-            bytes.len(),
-            HEX_CHARS_PER_VALUE
+            "page length {} is not i32-aligned",
+            bytes.len()
         ));
     }
-    let mut values = Vec::with_capacity(bytes.len() / HEX_CHARS_PER_VALUE as usize);
-    for chunk in bytes.chunks_exact(HEX_CHARS_PER_VALUE as usize) {
-        let mut bits: u32 = 0;
-        for &ch in chunk {
-            let nibble = match ch {
-                b'0'..=b'9' => ch - b'0',
-                b'a'..=b'f' => ch - b'a' + 10,
-                _ => {
-                    return Err(alloc::format!(
-                        "packed vector contains non-hex byte 0x{ch:02x}"
-                    ))
-                }
-            };
-            bits = (bits << 4) | u32::from(nibble);
-        }
-        values.push(bits as i32);
-    }
-    Ok(values)
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|chunk| i32::from_le_bytes(chunk.try_into().expect("chunks_exact(4)")))
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -217,13 +218,10 @@ fn clamp_i64(value: i64) -> i32 {
     }
 }
 
-/// Q16.16 multiply, saturating.
 pub fn mul(a: i32, b: i32) -> i32 {
     clamp_i64((a as i64 * b as i64) >> FRAC_BITS)
 }
 
-/// Q16.16 divide, saturating. Dividing by zero yields zero rather than
-/// trapping: a tile must not panic on staged data.
 pub fn div(a: i32, b: i32) -> i32 {
     if b == 0 {
         return 0;
@@ -231,13 +229,10 @@ pub fn div(a: i32, b: i32) -> i32 {
     clamp_i64(((a as i64) << FRAC_BITS) / b as i64)
 }
 
-/// Saturating add.
 pub fn add_sat(a: i32, b: i32) -> i32 {
     a.saturating_add(b)
 }
 
-/// Integer square root: the largest `r` with `r*r <= value`. Deterministic on
-/// every target, which `f64::sqrt` would not be.
 pub fn isqrt(value: i64) -> i64 {
     if value <= 0 {
         return 0;
@@ -251,16 +246,11 @@ pub fn isqrt(value: i64) -> i64 {
     guess
 }
 
-/// `e^x` in Q16.16, via `e^x = 2^(x·log2 e)`: split the exponent into its
-/// integer and fractional parts, shift by the former, and evaluate a cubic on
-/// the latter. Saturates outside ±20.
 pub fn exp(x: i32) -> i32 {
-    /// log2(e)
     const LOG2E: i32 = 94548;
-    // 2^f ≈ 1 + f·(a1 + f·(a2 + f·a3)) on f ∈ [0,1)
-    const A1: i32 = 45426; // 0.693147
-    const A2: i32 = 15743; // 0.240227
-    const A3: i32 = 3634; // 0.055504
+    const A1: i32 = 45426;
+    const A2: i32 = 15743;
+    const A3: i32 = 3634;
 
     if x <= -(20 * ONE) {
         return 0;
@@ -270,8 +260,6 @@ pub fn exp(x: i32) -> i32 {
     }
 
     let y = mul(x, LOG2E);
-    // Arithmetic shift floors toward negative infinity, so the fraction stays
-    // in [0,1) for negative exponents too.
     let int_part = y >> FRAC_BITS;
     let frac = y - (int_part << FRAC_BITS);
     let poly = ONE + mul(frac, A1 + mul(frac, A2 + mul(frac, A3)));
@@ -288,23 +276,19 @@ pub fn exp(x: i32) -> i32 {
     }
 }
 
-/// `gelu(x) = x · sigmoid(1.702x)` — the sigmoid approximation, which needs
-/// only [`exp`] and stays integer-only.
 pub fn gelu(x: i32) -> i32 {
-    const GELU_COEFF: i32 = 111542; // 1.702
+    const GELU_COEFF: i32 = 111542;
     let z = mul(x, GELU_COEFF);
     let sigmoid = div(ONE, ONE.saturating_add(exp(-z)));
     mul(x, sigmoid)
 }
 
-/// Scales every element in place.
 pub fn scale_row(row: &mut [i32], scalar: i32) {
     for value in row.iter_mut() {
         *value = mul(*value, scalar);
     }
 }
 
-/// Elementwise saturating add of `src` into `dst`.
 pub fn add_row(dst: &mut [i32], src: &[i32]) -> core::result::Result<(), String> {
     if dst.len() != src.len() {
         return Err(alloc::format!(
@@ -319,7 +303,6 @@ pub fn add_row(dst: &mut [i32], src: &[i32]) -> core::result::Result<(), String>
     Ok(())
 }
 
-/// Q16.16 dot product, accumulated in i64.
 pub fn dot(a: &[i32], b: &[i32]) -> core::result::Result<i32, String> {
     if a.len() != b.len() {
         return Err(alloc::format!(
@@ -335,34 +318,6 @@ pub fn dot(a: &[i32], b: &[i32]) -> core::result::Result<i32, String> {
     Ok(clamp_i64(acc))
 }
 
-/// `row × matrix'` where `matrix` is row-major `out_len × row.len()`.
-pub fn matvec(
-    row: &[i32],
-    matrix: &[i32],
-    out_len: usize,
-) -> core::result::Result<Vec<i32>, String> {
-    if row.is_empty() {
-        return Err(String::from("projection input row is empty"));
-    }
-    if matrix.len() != out_len * row.len() {
-        return Err(alloc::format!(
-            "matrix has {} values, expected {} ({} x {})",
-            matrix.len(),
-            out_len * row.len(),
-            out_len,
-            row.len()
-        ));
-    }
-    let mut out = Vec::with_capacity(out_len);
-    for out_idx in 0..out_len {
-        let offset = out_idx * row.len();
-        out.push(dot(row, &matrix[offset..offset + row.len()])?);
-    }
-    Ok(out)
-}
-
-/// RMS normalisation: `x[i] = x[i] / rms(x) · weight[i]`, `eps` added to the
-/// mean square before the root.
 pub fn rms_norm(row: &mut [i32], weights: &[i32], eps: i64) -> core::result::Result<(), String> {
     if row.len() != weights.len() {
         return Err(alloc::format!(

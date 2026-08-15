@@ -1,0 +1,18 @@
+{
+  "format": 1,
+  "program_commitment": "54426c9ea838805018b012b5fe00233e89b44a5c4aa6185a7e5c54aa716b4d0d",
+  "tiles": {
+    "finish_selection": {
+      "image_id": "6f19dc0474928ba8bd9d9504f1f3797aa1e83736c99516434af4f60ae217b564",
+      "source_hash": "79d794f4b1acb28300000000000008db"
+    },
+    "scan_logit_chunk": {
+      "image_id": "4926569ce653911741f8895600b181739a6f2f46f537d81eb2279562817586fd",
+      "source_hash": "79d794f4b1acb28300000000000008db"
+    }
+  },
+  "toolchain": {
+    "risc0": "risc0-zkvm-1.2",
+    "build_mode": "local"
+  }
+}

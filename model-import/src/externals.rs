@@ -7,23 +7,28 @@
 //! the stages duplicate their boundary types — a chain member is a standalone
 //! program, and its guest cannot depend on a host-side crate.
 
-use raster::List;
+use raster::{Bytes, BytesPage, List};
 use serde::{Deserialize, Serialize};
 
-/// Number of hex chars one value occupies in a packed vector.
-pub const HEX_CHARS_PER_VALUE: usize = 8;
+/// Replay-unit page size shared by every `Bytes<P>` region this importer writes.
+pub const PAGE_SIZE: u64 = 196_608;
 
-/// Packs Q16.16 values into the hex leaf form every stage reads.
-pub fn pack_hex(values: &[i32]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = Vec::with_capacity(values.len() * HEX_CHARS_PER_VALUE);
+/// Packs Q16.16 values as little-endian i32s.
+pub fn pack_i32_bytes(values: &[i32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(values.len() * 4);
     for value in values {
-        let bits = *value as u32;
-        for shift in (0..HEX_CHARS_PER_VALUE as u32).rev() {
-            out.push(HEX[((bits >> (shift * 4)) & 0xf) as usize]);
-        }
+        out.extend_from_slice(&value.to_le_bytes());
     }
-    String::from_utf8(out).expect("hex packing is always ascii")
+    out
+}
+
+/// A computed / imported vector as a standalone page (index 0, offset 0).
+pub fn page_of_i32s(values: &[i32]) -> BytesPage {
+    BytesPage::__from_parts(0, 0, pack_i32_bytes(values))
+}
+
+pub fn paged_i32s(values: &[i32]) -> raster::runtime::Result<Bytes<196_608>> {
+    Bytes::<PAGE_SIZE>::paged(pack_i32_bytes(values))
 }
 
 // --- prompt-prepare ---------------------------------------------------------
@@ -43,10 +48,30 @@ pub struct BpeMerge {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
-pub struct PromptTokenizer {
-    pub vocab: List<TokenEntry>,
-    pub merges: List<BpeMerge>,
+pub struct VocabBucket {
+    pub entries: List<TokenEntry>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+pub struct MergeBucket {
+    pub rules: List<BpeMerge>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+pub struct PromptTokenizer {
+    pub vocab_bucket_count: u32,
+    pub merge_bucket_count: u32,
+    pub vocab_buckets: List<VocabBucket>,
+    pub merge_buckets: List<MergeBucket>,
+}
+
+/// The bucket hashes, re-exported from the stage's own `no_std` library.
+///
+/// Deliberately *not* reimplemented here. A wrong bucket does not fail loudly —
+/// the lookup simply misses and the piece tokenizes to UNK — so the only safe
+/// arrangement is one definition, compiled into both the fixture writer and the
+/// tile that replays in the guest.
+pub use prompt_prepare::input::{merge_bucket_of, vocab_bucket_of};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
 pub struct BpePieces {
@@ -56,24 +81,13 @@ pub struct BpePieces {
 // --- input-embedding --------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
-pub struct EmbeddingRow {
-    pub token_id: u32,
-    pub values_hex: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
 pub struct EmbeddingTable {
     pub hidden_size: u32,
-    pub rows: List<EmbeddingRow>,
+    #[page_size = 196_608]
+    pub values: Bytes<196_608>,
 }
 
 // --- prefill-prepare-aux ----------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
-pub struct PleEmbeddingRow {
-    pub token_id: u32,
-    pub values_hex: String,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
 pub struct PleLayerParams {
@@ -84,19 +98,21 @@ pub struct PleLayerParams {
     pub projection_scalar: i32,
     pub input_scale: i32,
     pub norm_eps: i64,
-    pub projection_hex: String,
-    pub norm_weights_hex: String,
+    pub norm_weights: BytesPage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
 pub struct PleLayer {
     pub params: PleLayerParams,
-    pub embedding_rows: List<PleEmbeddingRow>,
+    #[page_size = 196_608]
+    pub embeddings: Bytes<196_608>,
+    #[page_size = 196_608]
+    pub projection: Bytes<196_608>,
 }
 
 // --- prefill-range ----------------------------------------------------------
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
 pub struct LayerParams {
     pub layer_idx: u32,
     pub hidden_size: u32,
@@ -108,39 +124,50 @@ pub struct LayerParams {
     pub attn_scale: i32,
     pub layer_scalar: i32,
     pub norm_eps: i64,
-    pub norm_input_hex: String,
-    pub norm_post_attn_hex: String,
-    pub norm_pre_ffw_hex: String,
-    pub norm_post_ffw_hex: String,
-    pub q_norm_hex: String,
-    pub k_norm_hex: String,
-    pub w_q_hex: String,
-    pub w_k_hex: String,
-    pub w_v_hex: String,
-    pub w_o_hex: String,
-    pub w_gate_hex: String,
-    pub w_up_hex: String,
-    pub w_down_hex: String,
+    pub rope_base: i64,
+    pub rotary_dim: u32,
+    pub rope_freq_base_dim: u32,
+    pub kv_donor_layer: i32,
+    pub norm_input: BytesPage,
+    pub norm_post_attn: BytesPage,
+    pub norm_pre_ffw: BytesPage,
+    pub norm_post_ffw: BytesPage,
+    pub q_norm: BytesPage,
+    pub k_norm: BytesPage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+pub struct TransformerLayer {
+    pub params: LayerParams,
+    #[page_size = 196_608]
+    pub w_q: Bytes<196_608>,
+    #[page_size = 196_608]
+    pub w_k: Bytes<196_608>,
+    #[page_size = 196_608]
+    pub w_v: Bytes<196_608>,
+    #[page_size = 196_608]
+    pub w_o: Bytes<196_608>,
+    #[page_size = 196_608]
+    pub w_gate: Bytes<196_608>,
+    #[page_size = 196_608]
+    pub w_up: Bytes<196_608>,
+    #[page_size = 196_608]
+    pub w_down: Bytes<196_608>,
 }
 
 // --- prefill-finalize -------------------------------------------------------
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
-pub struct LogitRow {
-    pub token_id: u32,
-    pub values_hex: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
 pub struct FinalHeadParams {
     pub hidden_size: u32,
     pub norm_eps: i64,
     pub softcap: i32,
-    pub norm_weights_hex: String,
+    pub norm_weights: BytesPage,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
 pub struct FinalHead {
     pub params: FinalHeadParams,
-    pub rows: List<LogitRow>,
+    #[page_size = 196_608]
+    pub projection: Bytes<196_608>,
 }

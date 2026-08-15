@@ -4,8 +4,12 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use raster::List;
+use raster::{Bytes, BytesPage, List};
 use serde::{Deserialize, Serialize};
+
+/// Replay-unit page size for the embedding table. A multiple of every
+/// `hidden_size * 4` this chain is imported with (4 and 1536).
+pub const PAGE_SIZE: u64 = 196_608;
 
 /// The stage's committed first input, bound by the chain to `prompt_prepare`'s
 /// authorized output.
@@ -18,46 +22,16 @@ pub struct PromptTokenization {
     pub token_ids: List<u32>,
 }
 
-/// One embedding-table row: the token id it belongs to, and its values packed
-/// into a single hex leaf.
+/// The committed embedding table: vocab × hidden, row-major, dense so
+/// `token_id` is the row index.
 ///
-/// The packing is what makes a row `Materializable`: a `List<i32>` field would
-/// make the row a collection-bearing struct that can never cross a tile
-/// boundary, and it would also put every scalar in its own index node — at
-/// model scale that is millions of nodes for data that is only ever read one
-/// whole row at a time.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
-pub struct EmbeddingRow {
-    pub token_id: u32,
-    pub values_hex: String,
-}
-
-/// The committed embedding table.
-///
-/// `rows` is the collection this stage scans; `hidden_size` pins the width
-/// every row must have.
+/// `values` is a paged byte region — not `Materializable` — so the sequence
+/// indexes one page rather than scanning the vocabulary.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
 pub struct EmbeddingTable {
     pub hidden_size: u32,
-    pub rows: List<EmbeddingRow>,
-}
-
-/// One row lookup in flight: the prompt token id whose row is wanted.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
-pub struct RowQuery {
-    pub token_id: u32,
-}
-
-/// Outcome of scanning the embedding table for a [`RowQuery`].
-///
-/// This carries the matched row, so it is the one place in the program where
-/// recur state is not scalar-small: a scan has nowhere else to put its answer
-/// while it keeps looking. See `README.md` — a dynamic-index selection
-/// primitive would replace the scan (and this state) with one proof.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
-pub struct RowMatch {
-    pub found: bool,
-    pub values_hex: String,
+    #[page_size = 196_608]
+    pub values: Bytes<196_608>,
 }
 
 /// Loop-carried summary of failed rows: how many, and the first message.
@@ -67,47 +41,86 @@ pub struct ErrorSummary {
     pub first: String,
 }
 
-/// One prompt position: the token that produced it and its activation row,
-/// packed exactly like [`EmbeddingRow::values_hex`].
+/// One prompt position: the token that produced it and its activation row.
 ///
-/// The id travels *with* the row because this is the only point where both are
-/// in hand. A downstream stage that keys on the token — Gemma's per-layer
-/// embeddings, for instance — would otherwise get two parallel lists and no
-/// way to walk them together: a recur iterates one collection, so index-aligned
-/// pairs have to be zipped where they are produced.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+/// MUST match `ActivationRow` in every stage that passes activations on —
+/// the chain links by structural commitment, not by Rust type name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
 pub struct ActivationRow {
     pub token_id: u32,
-    pub values_hex: String,
+    pub values: BytesPage,
 }
 
-/// The stage's authorized output, and the pipeline's activation type: every
-/// stage that passes activations on defines this field-for-field, so a layer's
-/// output can feed the next layer's input.
+/// Key/value side of one token — the layer's KV cache entry.
 ///
-/// `errors` records rows the stage could not produce. The sequence folds it and
-/// fails the program if it is non-empty, so a successful run always carries one
-/// row per prompt token.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+/// MUST match `KeyRow` in every stage that carries activations: Gemma 3n's last
+/// 20 layers attend over an earlier layer's cache, so the cache has to survive a
+/// stage boundary, and a chain binds by structural commitment.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+pub struct KeyRow {
+    pub position: u32,
+    pub k: BytesPage,
+    pub v: BytesPage,
+}
+
+/// The stage's authorized output, and the pipeline's activation type.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
 pub struct ActivationSequence {
     pub rows: List<ActivationRow>,
     pub errors: List<String>,
+    /// This layer's own K/V cache, carried so a later sharing layer can attend
+    /// over it. Empty on stages that donate to nobody — which is every stage
+    /// except layers 13 and 14 — and ignored by every consumer that is not a
+    /// sharing layer.
+    pub kv: List<KeyRow>,
 }
 
-/// Number of hex chars one value occupies in a packed row.
-pub const HEX_CHARS_PER_VALUE: u32 = 8;
-
-/// Packs one row's values into the hex leaf form: 8 lowercase hex chars per
-/// value, concatenated. The fixture generator and any consumer must agree on
-/// this encoding byte-for-byte.
-pub fn pack_row_hex(values: &[i32]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = Vec::with_capacity(values.len() * HEX_CHARS_PER_VALUE as usize);
+/// Packs Q16.16 values as little-endian i32s into a standalone page.
+///
+/// A computed vector is a new leaf, not a page of an imported region, so
+/// `(index, offset) = (0, 0)`.
+pub fn pack_i32s(values: &[i32]) -> BytesPage {
+    let mut bytes = Vec::with_capacity(values.len() * 4);
     for value in values {
-        let bits = *value as u32;
-        for shift in (0..HEX_CHARS_PER_VALUE).rev() {
-            out.push(HEX[((bits >> (shift * 4)) & 0xf) as usize]);
-        }
+        bytes.extend_from_slice(&value.to_le_bytes());
     }
-    String::from_utf8(out).expect("hex packing is always ascii")
+    BytesPage::__from_parts(0, 0, bytes)
+}
+
+/// Decodes a page of little-endian i32s. A malformed leaf is a committed tile
+/// error, never a panic.
+pub fn unpack_i32s(page: &BytesPage) -> core::result::Result<Vec<i32>, String> {
+    let bytes = page.as_slice();
+    if bytes.len() % 4 != 0 {
+        return Err(alloc::format!(
+            "page length {} is not i32-aligned",
+            bytes.len()
+        ));
+    }
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|chunk| i32::from_le_bytes(chunk.try_into().expect("chunks_exact(4)")))
+        .collect())
+}
+
+/// Reads `n_values` i32s starting at global `byte_off` inside `page`.
+pub fn unpack_i32s_at(
+    page: &BytesPage,
+    byte_off: u64,
+    n_values: u32,
+) -> core::result::Result<Vec<i32>, String> {
+    let local = byte_off
+        .checked_sub(page.offset())
+        .ok_or_else(|| String::from("row offset is before this page"))? as usize;
+    let len = n_values as usize * 4;
+    let bytes = page.as_slice().get(local..local + len).ok_or_else(|| {
+        alloc::format!(
+            "row at byte {byte_off} spans past this page (local {local}, need {len}, have {})",
+            page.len()
+        )
+    })?;
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|chunk| i32::from_le_bytes(chunk.try_into().expect("chunks_exact(4)")))
+        .collect())
 }

@@ -5,437 +5,477 @@ version = "0.1.0"
 [[chain.stage]]
 name = "prompt_prepare"
 project = "prompt-prepare"
-inputs.tokenizer = { external = { path = "prompt-prepare/tokenizer.rastered", index_path = "prompt-prepare/tokenizer.rindex", commitment = "83a150e50111214e3dc925d36177e0618bfaf7952d5695c9198a956c2c1d056f" } }
-inputs.initial_pieces = { external = { path = "prompt-prepare/initial_pieces.rastered", index_path = "prompt-prepare/initial_pieces.rindex", commitment = "06d581356d7a32bc4fe8b1be3520de2f42096e580c31bf3c421b61c285c6dbc1" } }
+inputs.tokenizer = { external = { path = "prompt-prepare/tokenizer.rastered", index_path = "prompt-prepare/tokenizer.rindex", commitment = "aa9b15cfd910f92b91638a8af385aef31f5166466d7871652946f32575812718" } }
+inputs.initial_pieces = { external = { path = "prompt-prepare/initial_pieces.rastered", index_path = "prompt-prepare/initial_pieces.rindex", commitment = "7900ddd18ea891084c9c6396e3ea72870d46006967f6e0365f5cab0d8ca4109b" } }
 
 [[chain.stage]]
 name = "input_embedding"
 project = "input-embedding"
 inputs.prompt = { from = "prompt_prepare" }
-inputs.embedding = { external = { path = "input-embedding/embedding.rastered", index_path = "input-embedding/embedding.rindex", commitment = "89304c14a2cff148ab6959035a1627657fdbc3930ca5e98403b2a3b15141dd36" } }
+inputs.embedding = { external = { path = "input-embedding/embedding.rastered", index_path = "input-embedding/embedding.rindex", commitment = "30553440ea1546780bf102b8970ada22154cadc34d6c0fd6e6b33a5aa4fb9567" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l0"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer0.rastered", index_path = "prefill-prepare-aux/layer0.rindex", commitment = "d3032c4ba064b2d6ca1f9684a1b9b5d5c787256c73b3c868745f37127e92b351" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer0.rastered", index_path = "prefill-prepare-aux/layer0.rindex", commitment = "c59477925864e93bd8dff320bfbd4d47b6ebdf2a2018920b181445baa447ab72" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l1"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer1.rastered", index_path = "prefill-prepare-aux/layer1.rindex", commitment = "14b1fe81cd83129f5ceeb4a9b7422e7d07ee000345aae72e2fdd6add406d62dc" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer1.rastered", index_path = "prefill-prepare-aux/layer1.rindex", commitment = "ce8cf5aa7328ba46901138961d489056d3a628e6d2e910e57029eaecbb705f53" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l2"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer2.rastered", index_path = "prefill-prepare-aux/layer2.rindex", commitment = "8c93c5a8ceeee0d623b8245757cd834e0fa8e851d450473560a37a581fb8699c" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer2.rastered", index_path = "prefill-prepare-aux/layer2.rindex", commitment = "fe9b3fb3040971484ada502513ca9afdba43d81560ae37861f0b536fdc8a6799" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l3"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer3.rastered", index_path = "prefill-prepare-aux/layer3.rindex", commitment = "eaa585b11d8efa754bb6f7b342efbf103d631d6b3ca6f297b3f354be14d5e88c" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer3.rastered", index_path = "prefill-prepare-aux/layer3.rindex", commitment = "df9fa10716b6f711363bfc829c5a46a76b998080f4966a76b5145de3acb44cc6" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l4"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer4.rastered", index_path = "prefill-prepare-aux/layer4.rindex", commitment = "319f6271981435579426c99dc4a72ee716610b01b9cc5f0ed8e048c17e0ce3c0" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer4.rastered", index_path = "prefill-prepare-aux/layer4.rindex", commitment = "7fa60b40c6302d42d540fc750051f380ed6e0bbafeb5aa5de336194b36fc708a" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l5"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer5.rastered", index_path = "prefill-prepare-aux/layer5.rindex", commitment = "eae5aa89eee864c8c501eb208702b19c523a95597783b0da53d61bc99ce4f5c5" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer5.rastered", index_path = "prefill-prepare-aux/layer5.rindex", commitment = "972a3ed72dca4b2f448b98aa6741ca656312938ad7523215adde20f28ac6154a" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l6"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer6.rastered", index_path = "prefill-prepare-aux/layer6.rindex", commitment = "c42d523567e962cd958969c458c69529efb6626210236e5ae042c320b7a24369" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer6.rastered", index_path = "prefill-prepare-aux/layer6.rindex", commitment = "85a555aefc8e0c510e791726f2851a863d73d3dd220cc5b2b2194953872f95ff" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l7"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer7.rastered", index_path = "prefill-prepare-aux/layer7.rindex", commitment = "d6479482ee08c5849a103df22394968383a560b0124cbedfabc8568c6b664f3d" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer7.rastered", index_path = "prefill-prepare-aux/layer7.rindex", commitment = "80c00ffa30ab2e77f9f97bf13d669e6906a9100a571d5bb34412fc3a3324d41b" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l8"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer8.rastered", index_path = "prefill-prepare-aux/layer8.rindex", commitment = "19355e9e33e963cf7d48435e90c82a268a82d8ce093c0e01fd9821ffec10da98" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer8.rastered", index_path = "prefill-prepare-aux/layer8.rindex", commitment = "489ad4a57c5b03d6907b575fa65a67a87a91f1b3393967253391ad65ae05c913" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l9"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer9.rastered", index_path = "prefill-prepare-aux/layer9.rindex", commitment = "df4a2fd1f9c13f70c5ace8aa708226c7099d822a4827dddf1c5601b1eeeb3155" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer9.rastered", index_path = "prefill-prepare-aux/layer9.rindex", commitment = "dec0a59729f82d8e84fabdaca67954434dedc6a5635d5840d7fc045d0da867a6" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l10"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer10.rastered", index_path = "prefill-prepare-aux/layer10.rindex", commitment = "4d77e05ac3ec7a91bdec79cff4ab8997421098f719a3f4d4110f15ce74ee7d72" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer10.rastered", index_path = "prefill-prepare-aux/layer10.rindex", commitment = "bf70a4f29de974108a17a37a45769dc45423744127dff03f508fe6f215c7d4cf" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l11"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer11.rastered", index_path = "prefill-prepare-aux/layer11.rindex", commitment = "5cd29bb09075a662d00c5f1458ade545aaef7a78624099275202772aba2d4e96" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer11.rastered", index_path = "prefill-prepare-aux/layer11.rindex", commitment = "e9b25c232e1fd8b7e0595d08f077c917cc1267687e088f768f20e129074df2f5" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l12"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer12.rastered", index_path = "prefill-prepare-aux/layer12.rindex", commitment = "f02c77479a26a70c438662868ecaa0a366ead83ad11f94752f4edf5c86013588" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer12.rastered", index_path = "prefill-prepare-aux/layer12.rindex", commitment = "2a5f3deb851489f43ebc64c01b3691ac9e462ef9ab1df90c28181e924675de85" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l13"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer13.rastered", index_path = "prefill-prepare-aux/layer13.rindex", commitment = "071aecc7466f4e4892bd525b2ca506dd2595fe3855e3fe93d15cd1ada4c1fd2e" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer13.rastered", index_path = "prefill-prepare-aux/layer13.rindex", commitment = "89972d3a0807db78b4d6c7feff386dca2d59009e71b5036f389dc1979a46cfe6" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l14"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer14.rastered", index_path = "prefill-prepare-aux/layer14.rindex", commitment = "48234b1ced9ceea6aaa41428d1d1be6510fed23034c92936de55fbc1b3957f34" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer14.rastered", index_path = "prefill-prepare-aux/layer14.rindex", commitment = "9c93cd0dd00c5a0e7af978a031c951d67f42728ff452292baad816c8bf81c098" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l15"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer15.rastered", index_path = "prefill-prepare-aux/layer15.rindex", commitment = "ab5b1d0e9af67d5c14727df91d5d3fa094beb1f2d94d4037b5cfe8b6aeb44932" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer15.rastered", index_path = "prefill-prepare-aux/layer15.rindex", commitment = "acfa917926ad73053891b791ba94c522882092f97664b18f6eb75e40a40baff3" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l16"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer16.rastered", index_path = "prefill-prepare-aux/layer16.rindex", commitment = "81452cea0f2c36c34138a62ff2e2a5f639f04d3b173171ad50f68e84d6f84654" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer16.rastered", index_path = "prefill-prepare-aux/layer16.rindex", commitment = "d5ef22cd2b392748f17142ff02cde65623761b49d1cc1962b72e4449f86393ec" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l17"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer17.rastered", index_path = "prefill-prepare-aux/layer17.rindex", commitment = "b93edbdc4ca736cf1224d180995430cf06fab99c0e4714ef7c05dd52fe537ce1" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer17.rastered", index_path = "prefill-prepare-aux/layer17.rindex", commitment = "322d2df09e67099c4fed899dca170b4bc938bbb88cc1c5dd47a2a8609a875612" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l18"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer18.rastered", index_path = "prefill-prepare-aux/layer18.rindex", commitment = "9ac725351cd9fff1e2544b1a2a34c93bddb87d2d42b3180cd8f626603141a90c" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer18.rastered", index_path = "prefill-prepare-aux/layer18.rindex", commitment = "013f907e34506bcc6424a3c792575d128fb433809f3b2e0b0d5f4fe9ebe2f56a" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l19"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer19.rastered", index_path = "prefill-prepare-aux/layer19.rindex", commitment = "f7c51f0ff2197cd46027981f2605ed4fe544fc209d6ac0a604949f0f0f827001" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer19.rastered", index_path = "prefill-prepare-aux/layer19.rindex", commitment = "c596a3bbf7ab56e1b7e4a65a3049aa4b78deda1a8a6aa92dada8a07dbea514e1" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l20"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer20.rastered", index_path = "prefill-prepare-aux/layer20.rindex", commitment = "40a1ca2da99545757c0ade334a4adf5faf77efd32c6b96900fad3bb2c09b46cf" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer20.rastered", index_path = "prefill-prepare-aux/layer20.rindex", commitment = "9b715db7729b024b457c4d1e778d13808ba931f5b74afbea400d8a5d137cec03" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l21"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer21.rastered", index_path = "prefill-prepare-aux/layer21.rindex", commitment = "bd756d9928490a438fed08f009f91c1109804c60e1d73204c83e327b65b65ca0" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer21.rastered", index_path = "prefill-prepare-aux/layer21.rindex", commitment = "a42d13d10ad89bebdea61190cd17ad43799e65643b5ada9044ca9db41d5345fb" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l22"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer22.rastered", index_path = "prefill-prepare-aux/layer22.rindex", commitment = "9534f41a82a55764cf97df9ec68cbd688406ff0070c7c7e5d298c3c6b5b7c7b1" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer22.rastered", index_path = "prefill-prepare-aux/layer22.rindex", commitment = "e8369e1db75f529fe3feb0db7d44ad4b5cbee746bd8164fbdde6cd3eb4725e72" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l23"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer23.rastered", index_path = "prefill-prepare-aux/layer23.rindex", commitment = "b738f004751ae18418f2adf93b0b7fd3d459849c1859a8387552e220927a6405" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer23.rastered", index_path = "prefill-prepare-aux/layer23.rindex", commitment = "e509f43c0c2eee0cbe3fbd6ff512595beb3960dbae66b547f4a302cc8d2da85b" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l24"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer24.rastered", index_path = "prefill-prepare-aux/layer24.rindex", commitment = "60363fa50ab8f74b384d3b82874c17f8bc422d851baa7b0f5957385b34c8b2a6" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer24.rastered", index_path = "prefill-prepare-aux/layer24.rindex", commitment = "af3ce6c45438b49cd741d0f69c324b3a9553e5030947c7c69645aa586158f509" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l25"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer25.rastered", index_path = "prefill-prepare-aux/layer25.rindex", commitment = "7125ce9a22d2d554e26aca81f6efe649793331432da16fd1abafd517044b18f5" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer25.rastered", index_path = "prefill-prepare-aux/layer25.rindex", commitment = "648d1d431b762fdd21f90e22b4a1d5d57f85aa54ce92794610cbba76cdefd55c" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l26"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer26.rastered", index_path = "prefill-prepare-aux/layer26.rindex", commitment = "3175fdac96ff1e2f51424d1af4e6b19cac2c6dd5ca90aaff5ef773fd36ebfd12" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer26.rastered", index_path = "prefill-prepare-aux/layer26.rindex", commitment = "96035f5a7139b5eddeb26535631f2b97963a96f39ec3b09e4baa0a65c28d302a" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l27"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer27.rastered", index_path = "prefill-prepare-aux/layer27.rindex", commitment = "a3f5e1876a3ff830db52079919a1875cfec3f30e849cd7f1904c8cdb1c7ad96d" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer27.rastered", index_path = "prefill-prepare-aux/layer27.rindex", commitment = "f917018f73aa3f58992f98fb834998b80b0e9e5d24c33f5f9e7c4927ce851797" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l28"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer28.rastered", index_path = "prefill-prepare-aux/layer28.rindex", commitment = "0f2c6078270e30b852f39691cf0cf349763083008590a5859ca0a6f4071b823b" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer28.rastered", index_path = "prefill-prepare-aux/layer28.rindex", commitment = "27f3607b5c111b4f55d815b08a77ec19813f9142f3371229847e113f0a951d96" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l29"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer29.rastered", index_path = "prefill-prepare-aux/layer29.rindex", commitment = "3c070687820c40ecc9634fe08f7fd75614aba9915aea8e5657f9f5719a7e0de0" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer29.rastered", index_path = "prefill-prepare-aux/layer29.rindex", commitment = "e15b15601d9a38482588564428d0c52ae2f802a8cd382dd2a03944a3c1a5ce8e" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l30"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer30.rastered", index_path = "prefill-prepare-aux/layer30.rindex", commitment = "16903c56d6ea4afc43b3c93447c8f68192847fdd6b98cc90cdd45d02d1b0509f" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer30.rastered", index_path = "prefill-prepare-aux/layer30.rindex", commitment = "a32adef52ceba7d78c3c8513696a296373080748b6dbbd18432d17d15c1fe878" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l31"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer31.rastered", index_path = "prefill-prepare-aux/layer31.rindex", commitment = "c76c4cb03b3f8a66023bf12ea8f6060f021d30eaf8c9b080823a1968d92b8dc9" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer31.rastered", index_path = "prefill-prepare-aux/layer31.rindex", commitment = "0eb6db58210688bb5f62eafdb234e06612bbe5f9a033bb480cababca17e15311" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l32"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer32.rastered", index_path = "prefill-prepare-aux/layer32.rindex", commitment = "75334b8c9ce697a836947e0c909af782970f02bbd5e2a05ff6384a31ed52a868" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer32.rastered", index_path = "prefill-prepare-aux/layer32.rindex", commitment = "3c284ddd390da4b08acb7b6678cc785eda50826509084bc0780e13a006803dd1" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l33"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer33.rastered", index_path = "prefill-prepare-aux/layer33.rindex", commitment = "77b3d61f39d02fa3d93d131ccda6eeb377f9e2fd6e75df8d0794bc7a356ddbe1" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer33.rastered", index_path = "prefill-prepare-aux/layer33.rindex", commitment = "a4f018a7bfefc8879c1d1116bcfde76b88dfe3ab45b7575f2f8cdf56da6d07f6" } }
 
 [[chain.stage]]
 name = "prefill_prepare_aux_l34"
 project = "prefill-prepare-aux"
 inputs.embedded = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-prepare-aux/layer34.rastered", index_path = "prefill-prepare-aux/layer34.rindex", commitment = "01a1a2e5e22329febaff53b40a98542a11fcf6d6dcb6f78026d795eb87398769" } }
+inputs.layer = { external = { path = "prefill-prepare-aux/layer34.rastered", index_path = "prefill-prepare-aux/layer34.rindex", commitment = "974411c1e8c4788e038842b239fb411e4dabdcaab4404d27395081b9077e803e" } }
 
 [[chain.stage]]
 name = "prefill_range_l0"
 project = "prefill-range"
 inputs.activations = { from = "input_embedding" }
-inputs.layer = { external = { path = "prefill-range/layer0.rastered", index_path = "prefill-range/layer0.rindex", commitment = "5c4897e84e4e27aea13d6e9657a44eb88ecb6507cee2680c4c55e5aae7cb94c4" } }
+inputs.donor_kv = { from = "input_embedding" }
+inputs.layer = { external = { path = "prefill-range/layer0.rastered", index_path = "prefill-range/layer0.rindex", commitment = "1e6a9a08d80403bcfb7c314694f2374ee744e077d67bfacd7053dcc62c79fdcd" } }
 
 [[chain.stage]]
 name = "prefill_range_l1"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l0" }
-inputs.layer = { external = { path = "prefill-range/layer1.rastered", index_path = "prefill-range/layer1.rindex", commitment = "9295258dfa00fa7c0930523e6c6ae5d5ea8e348bac3d43483720169d137a4e3f" } }
+inputs.donor_kv = { from = "input_embedding" }
+inputs.layer = { external = { path = "prefill-range/layer1.rastered", index_path = "prefill-range/layer1.rindex", commitment = "7e851c32cfcd5bad9e5d7bd7581ef7ad4dfa01977a83f01ca4f8e3188c18856c" } }
 
 [[chain.stage]]
 name = "prefill_range_l2"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l1" }
-inputs.layer = { external = { path = "prefill-range/layer2.rastered", index_path = "prefill-range/layer2.rindex", commitment = "ffee8b9566e7bbd0d87cf66a73c53dcf625fa87bdf5f9123c0c4c52b718230b8" } }
+inputs.donor_kv = { from = "input_embedding" }
+inputs.layer = { external = { path = "prefill-range/layer2.rastered", index_path = "prefill-range/layer2.rindex", commitment = "252fab69d56ae21f5d46d29e2fe18d509ebfb218fc37b5de34cf065cef2ca398" } }
 
 [[chain.stage]]
 name = "prefill_range_l3"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l2" }
-inputs.layer = { external = { path = "prefill-range/layer3.rastered", index_path = "prefill-range/layer3.rindex", commitment = "12f8a16e50f4ccb492102c218296ee60b38d37fb572762c87ef86a87cd337553" } }
+inputs.donor_kv = { from = "input_embedding" }
+inputs.layer = { external = { path = "prefill-range/layer3.rastered", index_path = "prefill-range/layer3.rindex", commitment = "80f56e8f1aff14a9c262e1d5ac9e6e1e6f52975588b8bd95142d6dfd534cf55e" } }
 
 [[chain.stage]]
 name = "prefill_range_l4"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l3" }
-inputs.layer = { external = { path = "prefill-range/layer4.rastered", index_path = "prefill-range/layer4.rindex", commitment = "9085085286f4781f70973124170c85b52b04ea35d20a190cbec6052d356f7227" } }
+inputs.donor_kv = { from = "input_embedding" }
+inputs.layer = { external = { path = "prefill-range/layer4.rastered", index_path = "prefill-range/layer4.rindex", commitment = "5cd1f375f681a9e076609a534ceb466bacc84ee8e99faff13dc2d3c01f25ff4d" } }
 
 [[chain.stage]]
 name = "prefill_range_l5"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l4" }
-inputs.layer = { external = { path = "prefill-range/layer5.rastered", index_path = "prefill-range/layer5.rindex", commitment = "fdebe281b1671c6ca008cad072b7d261460029786c83303d72dfb8ea7e59e5de" } }
+inputs.donor_kv = { from = "input_embedding" }
+inputs.layer = { external = { path = "prefill-range/layer5.rastered", index_path = "prefill-range/layer5.rindex", commitment = "7c1f71978fcd3a5acd34ce1199124e6d4bca6a82e9aad5eeb9a42cfd6a4d17fe" } }
 
 [[chain.stage]]
 name = "prefill_range_l6"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l5" }
-inputs.layer = { external = { path = "prefill-range/layer6.rastered", index_path = "prefill-range/layer6.rindex", commitment = "50f38aab14a78fd0f9586b9d0f089a50ef22563e7457bcab92318d9a1a761452" } }
+inputs.donor_kv = { from = "input_embedding" }
+inputs.layer = { external = { path = "prefill-range/layer6.rastered", index_path = "prefill-range/layer6.rindex", commitment = "04186429a30ab901e20770c04f351d64d9a3976d33b150520a3e6955b7104fc4" } }
 
 [[chain.stage]]
 name = "prefill_range_l7"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l6" }
-inputs.layer = { external = { path = "prefill-range/layer7.rastered", index_path = "prefill-range/layer7.rindex", commitment = "7194b86032978970f3074a31f765d4dc35cf5e7e38c172095c79a41037799c3b" } }
+inputs.donor_kv = { from = "input_embedding" }
+inputs.layer = { external = { path = "prefill-range/layer7.rastered", index_path = "prefill-range/layer7.rindex", commitment = "b6bf7f1d4944d2dda3884ca1c5d35ce4c302a4e441d23c9afee6e8f5a08dfce8" } }
 
 [[chain.stage]]
 name = "prefill_range_l8"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l7" }
-inputs.layer = { external = { path = "prefill-range/layer8.rastered", index_path = "prefill-range/layer8.rindex", commitment = "9ce7a3fa38a921791497634dc3f33c60848bb23fbb3934a970be755bdd115430" } }
+inputs.donor_kv = { from = "input_embedding" }
+inputs.layer = { external = { path = "prefill-range/layer8.rastered", index_path = "prefill-range/layer8.rindex", commitment = "2375b9c7110036a60499cefeaf08422bdf82eefeb5e0d78ce3c51dd66baee704" } }
 
 [[chain.stage]]
 name = "prefill_range_l9"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l8" }
-inputs.layer = { external = { path = "prefill-range/layer9.rastered", index_path = "prefill-range/layer9.rindex", commitment = "54d8e0a07166ce3d49a39d210beb042968b63c9f366a4c7151c74a83a5b14ad4" } }
+inputs.donor_kv = { from = "input_embedding" }
+inputs.layer = { external = { path = "prefill-range/layer9.rastered", index_path = "prefill-range/layer9.rindex", commitment = "020df40ffb29d5c884de0ed0f420aa3bc741dab29937316aa9869a566161d11b" } }
 
 [[chain.stage]]
 name = "prefill_range_l10"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l9" }
-inputs.layer = { external = { path = "prefill-range/layer10.rastered", index_path = "prefill-range/layer10.rindex", commitment = "227cf869ffa17c6af080107825b9cd4740d619c0d53b79366146437f8ce77f2b" } }
+inputs.donor_kv = { from = "input_embedding" }
+inputs.layer = { external = { path = "prefill-range/layer10.rastered", index_path = "prefill-range/layer10.rindex", commitment = "b1a85db7e5d1092008ea3d74d3b9ca4d146e7338bef1482dda3e6d7d9d348914" } }
 
 [[chain.stage]]
 name = "prefill_range_l11"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l10" }
-inputs.layer = { external = { path = "prefill-range/layer11.rastered", index_path = "prefill-range/layer11.rindex", commitment = "e5e887946e56e6981f7a500eb277896e38af17eb47d4367c229a2302cb50664d" } }
+inputs.donor_kv = { from = "input_embedding" }
+inputs.layer = { external = { path = "prefill-range/layer11.rastered", index_path = "prefill-range/layer11.rindex", commitment = "435204c3669f226060b207b2bcc1a5bf29d11f8ca63da7a137185c7b0b328c7f" } }
 
 [[chain.stage]]
 name = "prefill_range_l12"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l11" }
-inputs.layer = { external = { path = "prefill-range/layer12.rastered", index_path = "prefill-range/layer12.rindex", commitment = "f59b8022e6779755d9aeea46711e409ebf90d1cca024e87032803f8166be9ac1" } }
+inputs.donor_kv = { from = "input_embedding" }
+inputs.layer = { external = { path = "prefill-range/layer12.rastered", index_path = "prefill-range/layer12.rindex", commitment = "42de547ee977cdb38bde882e69fe129c71ba960124634e11c26aa49e491774ae" } }
 
 [[chain.stage]]
 name = "prefill_range_l13"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l12" }
-inputs.layer = { external = { path = "prefill-range/layer13.rastered", index_path = "prefill-range/layer13.rindex", commitment = "1a99e41fe683404e717a806d56022d8b5b4b315e75996776de076e8d967fa7c2" } }
+inputs.donor_kv = { from = "input_embedding" }
+inputs.layer = { external = { path = "prefill-range/layer13.rastered", index_path = "prefill-range/layer13.rindex", commitment = "09fa7a5b0979cdd35caeca6f29e58ea52cbbbc50228620c1bdb859e14c372fcb" } }
 
 [[chain.stage]]
 name = "prefill_range_l14"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l13" }
-inputs.layer = { external = { path = "prefill-range/layer14.rastered", index_path = "prefill-range/layer14.rindex", commitment = "512e6708b19345757bc808f15d52645310f6c09f44f7564211d954fa84687cef" } }
+inputs.donor_kv = { from = "input_embedding" }
+inputs.layer = { external = { path = "prefill-range/layer14.rastered", index_path = "prefill-range/layer14.rindex", commitment = "6f477c6b577d5121565108f8021d09eb39cdebe262cc5b6130f93f3cd8218eff" } }
 
 [[chain.stage]]
 name = "prefill_range_l15"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l14" }
-inputs.layer = { external = { path = "prefill-range/layer15.rastered", index_path = "prefill-range/layer15.rindex", commitment = "cb776b5ea4570acd0cfbf25759274cde9f02b43127df9db68bf123f321660132" } }
+inputs.donor_kv = { from = "prefill_range_l13" }
+inputs.layer = { external = { path = "prefill-range/layer15.rastered", index_path = "prefill-range/layer15.rindex", commitment = "00a58eb60d1ad392042e6bf991d63c9b6265af144e93d5efcda276e9656165bb" } }
 
 [[chain.stage]]
 name = "prefill_range_l16"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l15" }
-inputs.layer = { external = { path = "prefill-range/layer16.rastered", index_path = "prefill-range/layer16.rindex", commitment = "fca81c8cc0fb6b4e20798717d3d37072e1282fa0110132c3ba27c599fbf66061" } }
+inputs.donor_kv = { from = "prefill_range_l13" }
+inputs.layer = { external = { path = "prefill-range/layer16.rastered", index_path = "prefill-range/layer16.rindex", commitment = "1f4ac82d38f165273ca719398504dbdedb22c8ea7bac2cbdc0eed61a78b5737b" } }
 
 [[chain.stage]]
 name = "prefill_range_l17"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l16" }
-inputs.layer = { external = { path = "prefill-range/layer17.rastered", index_path = "prefill-range/layer17.rindex", commitment = "bed462b17df2e752ec38ee4d990e66c7ba26d2fc710c9cae47fdbc95acebe352" } }
+inputs.donor_kv = { from = "prefill_range_l13" }
+inputs.layer = { external = { path = "prefill-range/layer17.rastered", index_path = "prefill-range/layer17.rindex", commitment = "1847909dfe407a986443ff8fc91d99942214d55323aa9d30549b36bde6dd2fa5" } }
 
 [[chain.stage]]
 name = "prefill_range_l18"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l17" }
-inputs.layer = { external = { path = "prefill-range/layer18.rastered", index_path = "prefill-range/layer18.rindex", commitment = "ff5a6206242288081f9abe214161430c32d09054f3c093f55220c0409309ca94" } }
+inputs.donor_kv = { from = "prefill_range_l13" }
+inputs.layer = { external = { path = "prefill-range/layer18.rastered", index_path = "prefill-range/layer18.rindex", commitment = "c71a5a4c7753b1bf99397750274b2158d7c965632a8ae0d67f561ad90213d94f" } }
 
 [[chain.stage]]
 name = "prefill_range_l19"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l18" }
-inputs.layer = { external = { path = "prefill-range/layer19.rastered", index_path = "prefill-range/layer19.rindex", commitment = "3a7fe08b1337bfc373bb1e308e1a77672e738b280323cea21e519a1ccf11547c" } }
+inputs.donor_kv = { from = "prefill_range_l14" }
+inputs.layer = { external = { path = "prefill-range/layer19.rastered", index_path = "prefill-range/layer19.rindex", commitment = "cda8da5ac344b518f60b202a3e5ed5b2d30acd6fab4592f0f98d1536975501d6" } }
 
 [[chain.stage]]
 name = "prefill_range_l20"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l19" }
-inputs.layer = { external = { path = "prefill-range/layer20.rastered", index_path = "prefill-range/layer20.rindex", commitment = "11419754fb2ab39ad8aff0d99b9a30c9ad0357435ac04a8820ddc691fec25ebd" } }
+inputs.donor_kv = { from = "prefill_range_l13" }
+inputs.layer = { external = { path = "prefill-range/layer20.rastered", index_path = "prefill-range/layer20.rindex", commitment = "ab94f20ba3859b0d35bb16567c7231840e6eb689ef4e860be555384d1705d582" } }
 
 [[chain.stage]]
 name = "prefill_range_l21"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l20" }
-inputs.layer = { external = { path = "prefill-range/layer21.rastered", index_path = "prefill-range/layer21.rindex", commitment = "90600399a7cf94c0b5524a6a67881f2bbd7f1d3d83c3103a1fed8d662db41312" } }
+inputs.donor_kv = { from = "prefill_range_l13" }
+inputs.layer = { external = { path = "prefill-range/layer21.rastered", index_path = "prefill-range/layer21.rindex", commitment = "fd056e323c73c77fdf5c4839272e015875b3be774f22cc802c1f23c6f667d897" } }
 
 [[chain.stage]]
 name = "prefill_range_l22"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l21" }
-inputs.layer = { external = { path = "prefill-range/layer22.rastered", index_path = "prefill-range/layer22.rindex", commitment = "45bfe099414bda595e577552d5eab8cff88cbb2de72471129088ec70841caba6" } }
+inputs.donor_kv = { from = "prefill_range_l13" }
+inputs.layer = { external = { path = "prefill-range/layer22.rastered", index_path = "prefill-range/layer22.rindex", commitment = "34cd31774e5495ffc4d90da478092e1b4fbb111b516e4f52250f9f21223cdb9b" } }
 
 [[chain.stage]]
 name = "prefill_range_l23"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l22" }
-inputs.layer = { external = { path = "prefill-range/layer23.rastered", index_path = "prefill-range/layer23.rindex", commitment = "6dc28c5e31d8dca059d4971604139ca9781f0cb8704cf30336d036ea213c9e4f" } }
+inputs.donor_kv = { from = "prefill_range_l13" }
+inputs.layer = { external = { path = "prefill-range/layer23.rastered", index_path = "prefill-range/layer23.rindex", commitment = "6b970d76e3d3098319f07d88df5532474d6de710294748e15decaa4295a607f8" } }
 
 [[chain.stage]]
 name = "prefill_range_l24"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l23" }
-inputs.layer = { external = { path = "prefill-range/layer24.rastered", index_path = "prefill-range/layer24.rindex", commitment = "d335ddd52215f14fdf8e0e5d6bf3031e7800c0c0d3d9937aa01e3776a878adbd" } }
+inputs.donor_kv = { from = "prefill_range_l14" }
+inputs.layer = { external = { path = "prefill-range/layer24.rastered", index_path = "prefill-range/layer24.rindex", commitment = "22a86351acd46bff37e289dd9f8d36c85d2af8329f9ec865eaf956f83c5d3c92" } }
 
 [[chain.stage]]
 name = "prefill_range_l25"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l24" }
-inputs.layer = { external = { path = "prefill-range/layer25.rastered", index_path = "prefill-range/layer25.rindex", commitment = "536a3028fe490dc969850911aa4cfcc2bf12b7eb11139cbfae6fec9d20cb6c66" } }
+inputs.donor_kv = { from = "prefill_range_l13" }
+inputs.layer = { external = { path = "prefill-range/layer25.rastered", index_path = "prefill-range/layer25.rindex", commitment = "4870b2d4265a3732199e8ba7ca79c63230e87fa673b21ebad76518688c2af52b" } }
 
 [[chain.stage]]
 name = "prefill_range_l26"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l25" }
-inputs.layer = { external = { path = "prefill-range/layer26.rastered", index_path = "prefill-range/layer26.rindex", commitment = "4d7328e8fb346e29595c062404ad187ae3cdaf7c74b8b45db16bcd1dab0a3898" } }
+inputs.donor_kv = { from = "prefill_range_l13" }
+inputs.layer = { external = { path = "prefill-range/layer26.rastered", index_path = "prefill-range/layer26.rindex", commitment = "75b95214c57b299733d67f3a73f69da6527289894350daf1232d6d3091e05477" } }
 
 [[chain.stage]]
 name = "prefill_range_l27"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l26" }
-inputs.layer = { external = { path = "prefill-range/layer27.rastered", index_path = "prefill-range/layer27.rindex", commitment = "9b6c0683529c60fe34b3c99bc9fe15d7c13198c40ee99411dcfe5bd5ba93a49b" } }
+inputs.donor_kv = { from = "prefill_range_l13" }
+inputs.layer = { external = { path = "prefill-range/layer27.rastered", index_path = "prefill-range/layer27.rindex", commitment = "b78acebec3f39c2ae4fda6716f52825dc6f235e263c52b45cd91269cbb5c213f" } }
 
 [[chain.stage]]
 name = "prefill_range_l28"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l27" }
-inputs.layer = { external = { path = "prefill-range/layer28.rastered", index_path = "prefill-range/layer28.rindex", commitment = "b04b3d574bff744c1a166fe3223df830736084ac54de220c6cba96116c631518" } }
+inputs.donor_kv = { from = "prefill_range_l13" }
+inputs.layer = { external = { path = "prefill-range/layer28.rastered", index_path = "prefill-range/layer28.rindex", commitment = "afea2eade2d394a5b8a1597f9c14172ad204bb5bce0a3230f8931418bfac1687" } }
 
 [[chain.stage]]
 name = "prefill_range_l29"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l28" }
-inputs.layer = { external = { path = "prefill-range/layer29.rastered", index_path = "prefill-range/layer29.rindex", commitment = "0de9623232c9beae00dc272053a4426ae3a2434ca76c8c8f3f081cda4bb4b7b3" } }
+inputs.donor_kv = { from = "prefill_range_l14" }
+inputs.layer = { external = { path = "prefill-range/layer29.rastered", index_path = "prefill-range/layer29.rindex", commitment = "496badded829e973a9c7206e7339033f6fef70839a4feb2548353b1af91a5698" } }
 
 [[chain.stage]]
 name = "prefill_range_l30"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l29" }
-inputs.layer = { external = { path = "prefill-range/layer30.rastered", index_path = "prefill-range/layer30.rindex", commitment = "c5b21317440ea855d4799c2376871d1811d6266704dc850fc73cd1135f2a2fd1" } }
+inputs.donor_kv = { from = "prefill_range_l13" }
+inputs.layer = { external = { path = "prefill-range/layer30.rastered", index_path = "prefill-range/layer30.rindex", commitment = "16b4e9f3e1ce78ea60a65c6ded613991111111c9d3e7534d36a245e994286d3f" } }
 
 [[chain.stage]]
 name = "prefill_range_l31"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l30" }
-inputs.layer = { external = { path = "prefill-range/layer31.rastered", index_path = "prefill-range/layer31.rindex", commitment = "21cef49dada5e73ff318b589323e1c961b0909e156fc18287a2553e406c8b588" } }
+inputs.donor_kv = { from = "prefill_range_l13" }
+inputs.layer = { external = { path = "prefill-range/layer31.rastered", index_path = "prefill-range/layer31.rindex", commitment = "ed096f62282173f8f074e71f76368946b241a47b3993b99a7fa8b7efdf0bba9b" } }
 
 [[chain.stage]]
 name = "prefill_range_l32"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l31" }
-inputs.layer = { external = { path = "prefill-range/layer32.rastered", index_path = "prefill-range/layer32.rindex", commitment = "e22a96ebb8764e128ca6cb67833ae4374bc293146fffd9c41bd807af15e63b65" } }
+inputs.donor_kv = { from = "prefill_range_l13" }
+inputs.layer = { external = { path = "prefill-range/layer32.rastered", index_path = "prefill-range/layer32.rindex", commitment = "bc9eb5ed34dc3a3f12953e05897970b728cdd53db359686b7f8484569c6a4d37" } }
 
 [[chain.stage]]
 name = "prefill_range_l33"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l32" }
-inputs.layer = { external = { path = "prefill-range/layer33.rastered", index_path = "prefill-range/layer33.rindex", commitment = "f03c3afb6b30c253bebd2108018d8eca10add93f2277adcc8a3b942dc72f5339" } }
+inputs.donor_kv = { from = "prefill_range_l13" }
+inputs.layer = { external = { path = "prefill-range/layer33.rastered", index_path = "prefill-range/layer33.rindex", commitment = "4bd730fba918a215b1b29a0cf8fc71e42d25fc35423756e4e056d522156534b8" } }
 
 [[chain.stage]]
 name = "prefill_range_l34"
 project = "prefill-range"
 inputs.activations = { from = "prefill_range_l33" }
-inputs.layer = { external = { path = "prefill-range/layer34.rastered", index_path = "prefill-range/layer34.rindex", commitment = "a6ced5e841f5821d682ec7a2b1347ceb1810b6a5cd0038a21a12fb35f291bf7b" } }
+inputs.donor_kv = { from = "prefill_range_l14" }
+inputs.layer = { external = { path = "prefill-range/layer34.rastered", index_path = "prefill-range/layer34.rindex", commitment = "829d63c4d813e7af0ef65d7ece3b5458b0826352659c7d134231488c4d91dabe" } }
 
 [[chain.stage]]
 name = "prefill_finalize"
 project = "prefill-finalize"
 inputs.activations = { from = "prefill_range_l34" }
-inputs.head = { external = { path = "prefill-finalize/head.rastered", index_path = "prefill-finalize/head.rindex", commitment = "f7f56b2e195eda2f36adf869d31105a0b1ba974396245ed6f0b9f308212f04ea" } }
+inputs.head = { external = { path = "prefill-finalize/head.rastered", index_path = "prefill-finalize/head.rindex", commitment = "1350b0900a0daee45572bf882164961f3c5cd7a33cdfec50d86972464fa2af3f" } }
+
+[[chain.stage]]
+name = "decode_select_token"
+project = "decode-select-token"
+inputs.logits = { from = "prefill_finalize" }

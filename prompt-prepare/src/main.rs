@@ -27,17 +27,24 @@ fn merge_prompt_piece(
     input: RecurSequenceInput<String>,
     state: RecurSequenceState<MergeCursor>,
     output: RecurSequenceOutput<MergedPieces>,
-    merges: List<BpeMerge>,
+    merge_buckets: List<MergeBucket>,
+    merge_bucket_count: u32,
 ) -> (
     RecurSequenceState<MergeCursor>,
     RecurSequenceOutput<MergedPieces>,
 ) {
     let step = call!(begin_merge_step, state, input);
 
+    // Hash the pair, then reach the one bucket it can be in. The index is an
+    // authorized value, so this is a lookup the prover cannot steer; the scan
+    // that follows walks a handful of rules instead of the whole table.
+    let bucket_idx = call!(merge_bucket_index, step.clone(), merge_bucket_count);
+    let bucket = select!(MergeBucket, merge_buckets[bucket_idx]);
+    let rules = select!(List<BpeMerge>, bucket.rules);
+
     let hit = call_recur!(
         tile = scan_merge_rules,
-        input = merges,
-        chunk = 4,
+        input = rules,
         state = MergeMatch {
             matched: false,
             rank: 0,
@@ -57,14 +64,18 @@ fn merge_prompt_piece(
 fn resolve_piece_token(
     input: RecurSequenceInput<String>,
     output: RecurSequenceOutput<PromptTokenization>,
-    vocab: List<TokenEntry>,
+    vocab_buckets: List<VocabBucket>,
+    vocab_bucket_count: u32,
 ) -> RecurSequenceOutput<PromptTokenization> {
     let query = call!(begin_vocab_lookup, input);
 
+    let bucket_idx = call!(vocab_bucket_index, query.clone(), vocab_bucket_count);
+    let bucket = select!(VocabBucket, vocab_buckets[bucket_idx]);
+    let entries = select!(List<TokenEntry>, bucket.entries);
+
     let hit = call_recur!(
         tile = scan_vocab_chunk,
-        input = vocab,
-        chunk = 4,
+        input = entries,
         state = VocabMatch {
             found: false,
             token_id: UNK_TOKEN_ID
@@ -83,8 +94,10 @@ fn resolve_piece_token(
 /// authorized output the next chain stage consumes.
 #[sequence]
 fn main(tokenizer: PromptTokenizer, initial_pieces: BpePieces) -> PromptTokenization {
-    let merges = select!(List<BpeMerge>, tokenizer.clone().merges);
-    let vocab = select!(List<TokenEntry>, tokenizer.vocab);
+    let merge_bucket_count = select!(u32, tokenizer.clone().merge_bucket_count);
+    let vocab_bucket_count = select!(u32, tokenizer.clone().vocab_bucket_count);
+    let merge_buckets = select!(List<MergeBucket>, tokenizer.clone().merge_buckets);
+    let vocab_buckets = select!(List<VocabBucket>, tokenizer.vocab_buckets);
     let pieces = select!(List<String>, initial_pieces.pieces);
 
     let merged = call_recur_seq!(
@@ -95,7 +108,7 @@ fn main(tokenizer: PromptTokenizer, initial_pieces: BpePieces) -> PromptTokeniza
             has_pending: false
         },
         output = new!(MergedPieces),
-        args = (merges,)
+        args = (merge_buckets, merge_bucket_count)
     );
     raster::println!("merge pass → {:?}", merged);
 
@@ -105,7 +118,7 @@ fn main(tokenizer: PromptTokenizer, initial_pieces: BpePieces) -> PromptTokeniza
         sequence = resolve_piece_token,
         input = merged_pieces,
         output = new!(PromptTokenization),
-        args = (vocab,)
+        args = (vocab_buckets, vocab_bucket_count)
     );
     raster::println!("vocab pass → {:?}", tokenization);
 

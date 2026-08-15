@@ -1,31 +1,9 @@
 //! Phase 4 — `prefill-range`: tiles.
 //!
-//! One transformer layer over the prompt, following
-//! `det_kernels::det_layer_prefill`:
-//!
-//! ```text
-//!   normed  = rms_norm(x, w_input)
-//!   q,k,v   = normed × W_q, W_k, W_v
-//!   attn    = causal_softmax(q·kᵀ · scale) × v
-//!   x       = rms_norm(attn × W_o, w_post_attn) + x
-//!   normed  = rms_norm(x, w_pre_ffw)
-//!   ff      = (gelu(normed × W_gate) ⊙ (normed × W_up)) × W_down
-//!   x       = rms_norm(ff, w_post_ffw) + x
-//! ```
-//!
-//! Attention is why this stage has two passes: a token attends over *every*
-//! token's keys, so the K/V sequence has to be a finished, storage-backed list
-//! before any attention step can read it. Pass 1 builds it as a draft; pass 2
-//! attends over it. Within pass 2 the softmax is streaming (running max and
-//! sum), which is what keeps one replay unit to one key chunk.
-//!
-//! Attention is multi-head with grouped queries: `num_heads` query heads over
-//! `num_kv_heads` key/value heads, per-head RMS norms on Q and K, and an
-//! optional sliding window. Each head keeps its own streaming-softmax max,
-//! sum and accumulator, packed into the recur state.
-//!
-//! Like `prefill-prepare-aux`, the *layer* loop lives in the chain manifest —
-//! one stage instance per layer, each consuming the previous layer's output.
+//! One transformer layer over the prompt. Weight matrices are paged byte
+//! regions; each matvec is a recur over `.pages`. Attention is two passes:
+//! pass 1 drafts K/V, pass 2 attends. The layer loop lives in the chain
+//! manifest.
 //!
 //! `#![no_std]` so the same tiles compile into RISC0 replay guests.
 
@@ -34,16 +12,18 @@
 extern crate alloc;
 
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
+use det_num::ops::rope_rotate_pairs_in_place;
+use det_num::{Acc, Act};
 use raster::prelude::*;
 
 pub mod input;
 
-// The glob also brings the derive-generated `…DraftExt` traits into scope.
 use input::*;
 
-/// Guards the layer external before any of it is used: every matrix must have
-/// the width its declared shape implies.
+/// Guards scalar shapes and norm-vector widths. Matrix byte lengths are
+/// checked separately against the `Bytes` regions.
 #[tile(kind = iter, description = "Validate this layer's declared shapes")]
 pub fn validate_layer_params(params: LayerParams) -> Result<LayerParams> {
     let hidden = params.hidden_size as usize;
@@ -67,81 +47,213 @@ pub fn validate_layer_params(params: LayerParams) -> Result<LayerParams> {
             params.layer_idx
         ));
     }
+    // The RoPE kernel asserts these rather than returning, and an assert inside
+    // a tile is a panic instead of a committed error. Check them here so a bad
+    // fixture fails as data, at a step that can say which layer it was.
+    let rotary_dim = params.rotary_dim as usize;
+    if rotary_dim % 2 != 0 {
+        return Err(alloc::format!(
+            "layer {}: rotary_dim {rotary_dim} must be even",
+            params.layer_idx
+        ));
+    }
+    if rotary_dim > head_dim {
+        return Err(alloc::format!(
+            "layer {}: rotary_dim {rotary_dim} exceeds head_dim {head_dim}",
+            params.layer_idx
+        ));
+    }
+    let freq_base_dim = params.rope_freq_base_dim as usize;
+    if rotary_dim > 0 && (freq_base_dim < 2 || freq_base_dim % 2 != 0) {
+        return Err(alloc::format!(
+            "layer {}: rope_freq_base_dim {freq_base_dim} must be even and at least 2",
+            params.layer_idx
+        ));
+    }
+    if rotary_dim > 0 && params.rope_base <= 0 {
+        return Err(alloc::format!(
+            "layer {}: rope_base must be positive",
+            params.layer_idx
+        ));
+    }
     if params.norm_eps < 0 {
         return Err(String::from("rms-norm epsilon must be non-negative"));
     }
 
-    let checks: [(&str, &String, usize); 13] = [
-        ("norm_input", &params.norm_input_hex, hidden),
-        ("norm_post_attn", &params.norm_post_attn_hex, hidden),
-        ("norm_pre_ffw", &params.norm_pre_ffw_hex, hidden),
-        ("norm_post_ffw", &params.norm_post_ffw_hex, hidden),
-        ("q_norm", &params.q_norm_hex, head_dim),
-        ("k_norm", &params.k_norm_hex, head_dim),
-        ("w_q", &params.w_q_hex, heads * head_dim * hidden),
-        ("w_k", &params.w_k_hex, kv_heads * head_dim * hidden),
-        ("w_v", &params.w_v_hex, kv_heads * head_dim * hidden),
-        ("w_o", &params.w_o_hex, hidden * heads * head_dim),
-        ("w_gate", &params.w_gate_hex, ffn * hidden),
-        ("w_up", &params.w_up_hex, ffn * hidden),
-        ("w_down", &params.w_down_hex, hidden * ffn),
+    let checks: [(&str, &BytesPage, usize); 6] = [
+        ("norm_input", &params.norm_input, hidden),
+        ("norm_post_attn", &params.norm_post_attn, hidden),
+        ("norm_pre_ffw", &params.norm_pre_ffw, hidden),
+        ("norm_post_ffw", &params.norm_post_ffw, hidden),
+        ("q_norm", &params.q_norm, head_dim),
+        ("k_norm", &params.k_norm, head_dim),
     ];
-    for (name, packed, values) in checks {
-        let expected = values * HEX_CHARS_PER_VALUE as usize;
-        if packed.len() != expected {
+    for (name, page, values) in checks {
+        let expected = values * 4;
+        if page.len() != expected {
             return Err(alloc::format!(
-                "layer {} {name} has {} hex chars, expected {expected} ({values} values)",
+                "layer {} {name} has {} bytes, expected {expected} ({values} values)",
                 params.layer_idx,
-                packed.len()
+                page.len()
             ));
         }
     }
     Ok(params)
 }
 
+#[tile(kind = iter, description = "Layer hidden size")]
+pub fn hidden_of(params: LayerParams) -> u32 {
+    params.hidden_size
+}
+
+#[tile(kind = iter, description = "Query projection width")]
+pub fn q_out_len(params: LayerParams) -> u32 {
+    params.num_heads * params.head_dim
+}
+
+#[tile(kind = iter, description = "Key/value projection width")]
+pub fn kv_out_len(params: LayerParams) -> u32 {
+    params.num_kv_heads * params.head_dim
+}
+
+#[tile(kind = iter, description = "FFN width")]
+pub fn ffn_of(params: LayerParams) -> u32 {
+    params.ffn_size
+}
+
+#[tile(kind = iter, description = "Reject a weight region of the wrong byte length")]
+pub fn assert_matrix_bytes(byte_len: u64, out_len: u32, in_width: u32) -> Result<u32> {
+    let expected = out_len as u64 * in_width as u64 * 4;
+    if byte_len == expected {
+        Ok(0)
+    } else {
+        Err(alloc::format!(
+            "matrix has {byte_len} bytes, expected {expected} ({out_len} x {in_width} i32s)"
+        ))
+    }
+}
+
+#[tile(kind = iter, description = "Start the position counter at zero")]
+pub fn zero_u32() -> u32 {
+    0
+}
+
+#[tile(kind = iter, description = "Advance the token position")]
+pub fn advance_position(position: u32) -> u32 {
+    position + 1
+}
+
+#[tile(kind = iter, description = "Zero a matvec accumulator")]
+pub fn zero_accum(out_len: u32) -> ProjAccum {
+    ProjAccum {
+        values: pack_i32s(&vec![0; out_len as usize]),
+        error: String::new(),
+    }
+}
+
+/// One page of a row-major matrix: each output row is `in_width` i32s.
+#[tile(
+    kind = recur,
+    description = "MAC one weight page into the output accumulator",
+    estimated_cycles = 800_000
+)]
+pub fn mac_weight_page(
+    input: RecurInput<BytesPage>,
+    state: RecurState<ProjAccum>,
+    row: BytesPage,
+    in_width: u32,
+) -> RecurState<ProjAccum> {
+    let mut state = state;
+    if !state.error.is_empty() {
+        return state;
+    }
+    let page = input.into_value();
+    if let Err(error) = mac_page(&mut state, &page, &row, in_width) {
+        state.error = error;
+    }
+    state
+}
+
+fn mac_page(
+    state: &mut ProjAccum,
+    page: &BytesPage,
+    row: &BytesPage,
+    in_width: u32,
+) -> core::result::Result<(), String> {
+    let row = unpack_i32s(row)?;
+    if row.len() != in_width as usize {
+        return Err(alloc::format!(
+            "activation has {} values, expected in_width {in_width}",
+            row.len()
+        ));
+    }
+    if in_width == 0 {
+        return Err(String::from("matvec in_width is zero"));
+    }
+    let weights = unpack_i32s(page)?;
+    if weights.len() % row.len() != 0 {
+        return Err(String::from("weight page does not contain whole output rows"));
+    }
+    let stride = in_width as u64 * 4;
+    if page.offset() % stride != 0 {
+        return Err(String::from("weight page offset is not row-aligned"));
+    }
+    let mut out = unpack_i32s(&state.values)?;
+    let start_row = (page.offset() / stride) as usize;
+    let rows_in_page = weights.len() / row.len();
+    for local in 0..rows_in_page {
+        let out_idx = start_row + local;
+        if out_idx >= out.len() {
+            return Err(String::from("weight page writes past the accumulator"));
+        }
+        let w = &weights[local * row.len()..(local + 1) * row.len()];
+        out[out_idx] = dot(&row, w)?;
+    }
+    state.values = pack_i32s(&out);
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Pass 1 — projections
 // ---------------------------------------------------------------------------
 
-/// Normalises one activation row and projects it to Q, K and V.
-///
-/// A recur *tile*, not a sequence, for one reason: `input.index()` is the
-/// token's position, and only a tile can read it. That position is what the
-/// causal mask in pass 2 compares against.
-#[tile(
-    kind = recur,
-    description = "Normalise and project one token to Q/K/V",
-    estimated_cycles = 40000
-)]
-pub fn project_qkv_row(
-    input: RecurInput<ActivationRow>,
-    output: RecurOutput<KvSequence>,
-    params: LayerParams,
-) -> RecurOutput<KvSequence> {
-    let mut output = output;
-    let position = input.index() as u32;
-    let row = input.into_value();
-
-    match project_row(&row, &params) {
-        Ok((q, k, v, residual)) => output.rows().push(KvRow {
-            position,
-            token_id: row.token_id,
-            q_hex: pack_hex(&q),
-            k_hex: pack_hex(&k),
-            v_hex: pack_hex(&v),
-            residual_hex: pack_hex(&residual),
-        }),
-        Err(error) => output
-            .errors()
-            .push(alloc::format!("token at position {position}: {error}")),
-    }
-    output
+/// The RMS-normalised page on a Q/K/V prep. `select!(BytesPage, …)` is only
+/// for indexing a `Bytes` region.
+#[tile(kind = iter, description = "Normalised page of a Q/K/V prep")]
+pub fn qkv_normed(prep: QkvPrep) -> BytesPage {
+    prep.normed
 }
 
-type ProjectedRow = (Vec<i32>, Vec<i32>, Vec<i32>, Vec<i32>);
+/// The packed values of a vector that may carry an earlier error.
+#[tile(kind = iter, description = "Values page of a packed vector")]
+pub fn packed_values(vec: PackedVec) -> BytesPage {
+    vec.values
+}
 
-fn project_row(row: &ActivationRow, params: &LayerParams) -> core::result::Result<ProjectedRow, String> {
-    let residual = unpack_hex(&row.values_hex)?;
+/// RMS-normalise one activation row for the Q/K/V matvecs.
+#[tile(kind = iter, description = "RMS-normalise one token for Q/K/V")]
+pub fn begin_qkv(row: ActivationRow, params: LayerParams) -> QkvPrep {
+    match begin_qkv_inner(&row, &params) {
+        Ok((residual, normed)) => QkvPrep {
+            token_id: row.token_id,
+            residual: pack_i32s(&residual),
+            normed: pack_i32s(&normed),
+            error: String::new(),
+        },
+        Err(error) => QkvPrep {
+            token_id: row.token_id,
+            residual: pack_i32s(&[]),
+            normed: pack_i32s(&vec![0; params.hidden_size as usize]),
+            error,
+        },
+    }
+}
+
+fn begin_qkv_inner(
+    row: &ActivationRow,
+    params: &LayerParams,
+) -> core::result::Result<(Vec<i32>, Vec<i32>), String> {
+    let residual = unpack_i32s(&row.values)?;
     let hidden = params.hidden_size as usize;
     if residual.len() != hidden {
         return Err(alloc::format!(
@@ -149,48 +261,137 @@ fn project_row(row: &ActivationRow, params: &LayerParams) -> core::result::Resul
             residual.len()
         ));
     }
-
     let mut normed = residual.clone();
-    rms_norm(&mut normed, &unpack_hex(&params.norm_input_hex)?, params.norm_eps)?;
+    rms_norm(&mut normed, &unpack_i32s(&params.norm_input)?, params.norm_eps)?;
+    Ok((residual, normed))
+}
 
+/// Per-head Q/K norms, then append the key and query rows.
+#[tile(kind = iter, description = "Finish Q/K/V and append key and query rows")]
+pub fn finish_qkv(
+    output: Draft<KvSequence>,
+    position: u32,
+    prep: QkvPrep,
+    q: ProjAccum,
+    k: ProjAccum,
+    v: ProjAccum,
+    params: LayerParams,
+) -> Draft<KvSequence> {
+    let mut output = output;
+    match finish_qkv_inner(position, &prep, &q, &k, &v, &params) {
+        Ok((query, key)) => {
+            output.queries().push(query);
+            output.keys().push(key);
+        }
+        Err(error) => output
+            .errors()
+            .push(alloc::format!("token at position {position}: {error}")),
+    }
+    output
+}
+
+/// Rotary position embedding for one head row, in place.
+///
+/// Delegates to the vendored canonical kernel rather than reimplementing the
+/// rotation: `det_num::ops::rope_rotate_pairs_in_place` is a byte-for-byte copy
+/// of the reference's, held there by an equivalence test. The only work here is
+/// moving between the chain's raw Q16.16 `i32` lanes and the `Act` newtype.
+///
+/// `position == 0` and `rotary_dim == 0` are no-ops inside the kernel, so this
+/// needs no special case for them. The kernel's shape asserts are guaranteed by
+/// [`validate_layer_params`], which turns a bad fixture into a committed error
+/// before any row reaches here.
+fn apply_rope(head: &mut [i32], params: &LayerParams, position: u32) {
+    let rotary_dim = params.rotary_dim as usize;
+    if rotary_dim == 0 || position == 0 {
+        return;
+    }
+    let mut lanes: Vec<Act> = head.iter().map(|bits| Act::from_bits(*bits)).collect();
+    rope_rotate_pairs_in_place(
+        &mut lanes,
+        rotary_dim,
+        params.rope_freq_base_dim as usize,
+        Acc::from_bits(params.rope_base),
+        position as usize,
+    );
+    for (lane, rotated) in head.iter_mut().zip(lanes.iter()) {
+        *lane = rotated.to_bits();
+    }
+}
+
+fn finish_qkv_inner(
+    position: u32,
+    prep: &QkvPrep,
+    q: &ProjAccum,
+    k: &ProjAccum,
+    v: &ProjAccum,
+    params: &LayerParams,
+) -> core::result::Result<(QueryRow, KeyRow), String> {
+    if !prep.error.is_empty() {
+        return Err(prep.error.clone());
+    }
+    if !q.error.is_empty() {
+        return Err(q.error.clone());
+    }
+    if !k.error.is_empty() {
+        return Err(k.error.clone());
+    }
+    if !v.error.is_empty() {
+        return Err(v.error.clone());
+    }
+    let mut q = unpack_i32s(&q.values)?;
+    let mut k = unpack_i32s(&k.values)?;
+    let v = unpack_i32s(&v.values)?;
     let head_dim = params.head_dim as usize;
-    let q_width = params.num_heads as usize * head_dim;
-    let kv_width = params.num_kv_heads as usize * head_dim;
-
-    let mut q = matvec(&normed, &unpack_hex(&params.w_q_hex)?, q_width)?;
-    let mut k = matvec(&normed, &unpack_hex(&params.w_k_hex)?, kv_width)?;
-    let v = matvec(&normed, &unpack_hex(&params.w_v_hex)?, kv_width)?;
-
-    // Q and K are normalised per head, not across the concatenated vector.
-    let q_norm = unpack_hex(&params.q_norm_hex)?;
-    let k_norm = unpack_hex(&params.k_norm_hex)?;
+    let q_norm = unpack_i32s(&params.q_norm)?;
+    let k_norm = unpack_i32s(&params.k_norm)?;
+    // Norm then rotate, per head — the reference's order
+    // (`transformer_kernels.rs`, q_norm/k_norm before the two `apply_rope`
+    // calls). Swapping them changes every score.
     for head in q.chunks_mut(head_dim) {
         rms_norm(head, &q_norm, params.norm_eps)?;
+        apply_rope(head, params, position);
     }
     for head in k.chunks_mut(head_dim) {
         rms_norm(head, &k_norm, params.norm_eps)?;
+        apply_rope(head, params, position);
     }
-    Ok((q, k, v, residual))
+    Ok((
+        QueryRow {
+            position,
+            token_id: prep.token_id,
+            q: pack_i32s(&q),
+            residual: prep.residual.clone(),
+        },
+        KeyRow {
+            position,
+            k: pack_i32s(&k),
+            v: pack_i32s(&v),
+        },
+    ))
 }
 
 // ---------------------------------------------------------------------------
 // Pass 2 — attention and MLP
 // ---------------------------------------------------------------------------
 
-/// Materializes one K/V row's query side, so the steps that follow can each
-/// read it.
+/// Materializes one query so the steps that follow can each read it.
 #[tile(kind = iter, description = "Open one token's attention query")]
-pub fn begin_attention(row: KvRow) -> AttnQuery {
-    AttnQuery {
-        position: row.position,
-        token_id: row.token_id,
-        q_hex: row.q_hex,
-        residual_hex: row.residual_hex,
+pub fn begin_attention(row: QueryRow) -> QueryRow {
+    row
+}
+
+#[tile(kind = iter, description = "Empty streaming-softmax state")]
+pub fn zero_attn_state() -> AttnState {
+    AttnState {
+        started: false,
+        max: pack_i32s(&[]),
+        sum: pack_i32s(&[]),
+        acc: pack_i32s(&[]),
+        error: String::new(),
     }
 }
 
-/// Whether a key is visible to a query: causal always, plus the layer's
-/// sliding window when it has one.
 fn visible(query_position: u32, key_position: u32, sliding_window: u32) -> bool {
     if key_position > query_position {
         return false;
@@ -199,42 +400,44 @@ fn visible(query_position: u32, key_position: u32, sliding_window: u32) -> bool 
 }
 
 /// Attends one `Block` of keys/values, streaming-softmax style.
-///
-/// Keys at positions after the query are skipped — that is the causal mask.
-/// The running max keeps `exp` in range without a second pass over the scores,
-/// which is what lets one replay unit see one chunk instead of the whole
-/// sequence.
 #[tile(
     kind = recur,
     description = "Attend one chunk of keys with streaming softmax",
     estimated_cycles = 30000
 )]
 pub fn attend_kv_chunk(
-    input: RecurInput<Block<KvRow>>,
+    input: RecurInput<KeyRow>,
     state: RecurState<AttnState>,
-    query: AttnQuery,
+    query: QueryRow,
     params: LayerParams,
+    donor_pass: bool,
 ) -> RecurState<AttnState> {
     let mut state = state;
     if !state.error.is_empty() {
         return state;
     }
-    for key in input.into_value() {
-        if !visible(query.position, key.position, params.sliding_window) {
-            continue;
-        }
-        if let Err(error) = accumulate_key(&mut state, &query, &key, &params) {
-            state.error = error;
-            return state;
-        }
+    // A sequence cannot branch, so the caller runs this over both key lists —
+    // its own and the donor's — and exactly one pass contributes. Gemma 3n's
+    // last 20 layers attend over an earlier layer's cache; the rest attend over
+    // their own. The two passes chain one `AttnState`, so the streaming softmax
+    // is identical to a single pass over whichever list applies.
+    if (params.kv_donor_layer >= 0) != donor_pass {
+        return state;
+    }
+    let key = input.into_value();
+    if !visible(query.position, key.position, params.sliding_window) {
+        return state;
+    }
+    if let Err(error) = accumulate_key(&mut state, &query, &key, &params) {
+        state.error = error;
     }
     state
 }
 
 fn accumulate_key(
     state: &mut AttnState,
-    query: &AttnQuery,
-    key: &KvRow,
+    query: &QueryRow,
+    key: &KeyRow,
     params: &LayerParams,
 ) -> core::result::Result<(), String> {
     let head_dim = params.head_dim as usize;
@@ -242,9 +445,9 @@ fn accumulate_key(
     let kv_heads = params.num_kv_heads as usize;
     let group = heads / kv_heads;
 
-    let q = unpack_hex(&query.q_hex)?;
-    let k = unpack_hex(&key.k_hex)?;
-    let v = unpack_hex(&key.v_hex)?;
+    let q = unpack_i32s(&query.q)?;
+    let k = unpack_i32s(&key.k)?;
+    let v = unpack_i32s(&key.v)?;
     if q.len() != heads * head_dim || k.len() != kv_heads * head_dim || v.len() != k.len() {
         return Err(alloc::format!(
             "attention width mismatch: q {} k {} v {} for {heads}x{head_dim} over {kv_heads} kv heads",
@@ -256,20 +459,19 @@ fn accumulate_key(
 
     let (mut max, mut sum, mut acc) = if state.started {
         (
-            unpack_hex(&state.max_hex)?,
-            unpack_hex(&state.sum_hex)?,
-            unpack_hex(&state.acc_hex)?,
+            unpack_i32s(&state.max)?,
+            unpack_i32s(&state.sum)?,
+            unpack_i32s(&state.acc)?,
         )
     } else {
         (
-            alloc::vec![0; heads],
-            alloc::vec![0; heads],
-            alloc::vec![0; heads * head_dim],
+            vec![0; heads],
+            vec![0; heads],
+            vec![0; heads * head_dim],
         )
     };
 
     for head in 0..heads {
-        // Grouped-query attention: several query heads share one K/V head.
         let kv_head = head / group;
         let q_head = &q[head * head_dim..(head + 1) * head_dim];
         let k_head = &k[kv_head * head_dim..(kv_head + 1) * head_dim];
@@ -285,7 +487,6 @@ fn accumulate_key(
         }
 
         if score > max[head] {
-            // Rescale everything this head accumulated to the new maximum.
             let factor = exp(max[head] - score);
             for (value, new) in slot.iter_mut().zip(v_head) {
                 *value = add_sat(mul(*value, factor), *new);
@@ -302,32 +503,28 @@ fn accumulate_key(
     }
 
     state.started = true;
-    state.max_hex = pack_hex(&max);
-    state.sum_hex = pack_hex(&sum);
-    state.acc_hex = pack_hex(&acc);
+    state.max = pack_i32s(&max);
+    state.sum = pack_i32s(&sum);
+    state.acc = pack_i32s(&acc);
     Ok(())
 }
 
-/// Finishes the attention block for one token: normalise by the softmax
-/// denominator, project through `W_o`, normalise, and add the residual.
-#[tile(kind = iter, description = "Finish one token's attention block")]
-pub fn finish_attention(query: AttnQuery, state: AttnState, params: LayerParams) -> AttnOutput {
-    match finish_attention_row(&query, &state, &params) {
-        Ok(values) => AttnOutput {
-            values_hex: pack_hex(&values),
+/// Divide each head by its softmax denominator. Does not project through W_o.
+#[tile(kind = iter, description = "Normalise streaming-softmax accumulators")]
+pub fn softmax_context(state: AttnState, params: LayerParams) -> PackedVec {
+    match softmax_context_inner(&state, &params) {
+        Ok(values) => PackedVec {
+            values: pack_i32s(&values),
             error: String::new(),
         },
-        // Failure travels as data: a recur sequence has no fallible form, and
-        // `.expect()` in one would panic the program into publishing nothing.
-        Err(error) => AttnOutput {
-            values_hex: String::new(),
-            error: alloc::format!("token at position {}: {error}", query.position),
+        Err(error) => PackedVec {
+            values: pack_i32s(&vec![0; (params.num_heads * params.head_dim) as usize]),
+            error,
         },
     }
 }
 
-fn finish_attention_row(
-    query: &AttnQuery,
+fn softmax_context_inner(
     state: &AttnState,
     params: &LayerParams,
 ) -> core::result::Result<Vec<i32>, String> {
@@ -337,83 +534,200 @@ fn finish_attention_row(
     if !state.started {
         return Err(String::from("attention saw no keys at or before this token"));
     }
-
     let head_dim = params.head_dim as usize;
-    let sums = unpack_hex(&state.sum_hex)?;
-    let mut context = unpack_hex(&state.acc_hex)?;
-    // Each head normalises by its own softmax denominator before the heads are
-    // concatenated back into one vector for the output projection.
+    let sums = unpack_i32s(&state.sum)?;
+    let mut context = unpack_i32s(&state.acc)?;
     for (head, chunk) in context.chunks_mut(head_dim).enumerate() {
         let denominator = sums.get(head).copied().unwrap_or(0);
         for value in chunk.iter_mut() {
             *value = div(*value, denominator);
         }
     }
+    Ok(context)
+}
 
-    let hidden = params.hidden_size as usize;
-    let mut attn = matvec(&context, &unpack_hex(&params.w_o_hex)?, hidden)?;
+/// Post-attention RMS norm and residual add after the W_o matvec.
+#[tile(kind = iter, description = "Add residual after the output projection")]
+pub fn attn_residual(
+    query: QueryRow,
+    context: PackedVec,
+    attn_proj: ProjAccum,
+    params: LayerParams,
+) -> PackedVec {
+    if !context.error.is_empty() {
+        return PackedVec {
+            values: pack_i32s(&[]),
+            error: alloc::format!("token at position {}: {}", query.position, context.error),
+        };
+    }
+    if !attn_proj.error.is_empty() {
+        return PackedVec {
+            values: pack_i32s(&[]),
+            error: alloc::format!(
+                "token at position {}: {}",
+                query.position,
+                attn_proj.error
+            ),
+        };
+    }
+    match attn_residual_inner(&query, &attn_proj, &params) {
+        Ok(values) => PackedVec {
+            values: pack_i32s(&values),
+            error: String::new(),
+        },
+        Err(error) => PackedVec {
+            values: pack_i32s(&[]),
+            error: alloc::format!("token at position {}: {error}", query.position),
+        },
+    }
+}
+
+fn attn_residual_inner(
+    query: &QueryRow,
+    attn_proj: &ProjAccum,
+    params: &LayerParams,
+) -> core::result::Result<Vec<i32>, String> {
+    let mut attn = unpack_i32s(&attn_proj.values)?;
     rms_norm(
         &mut attn,
-        &unpack_hex(&params.norm_post_attn_hex)?,
+        &unpack_i32s(&params.norm_post_attn)?,
         params.norm_eps,
     )?;
-    add_row(&mut attn, &unpack_hex(&query.residual_hex)?)?;
+    add_row(&mut attn, &unpack_i32s(&query.residual)?)?;
     Ok(attn)
 }
 
-/// Runs the MLP block on the attention output and appends the layer's row.
-#[tile(
-    kind = iter,
-    description = "Run the MLP block and append the layer output row",
-    estimated_cycles = 60000
-)]
-pub fn apply_mlp(
+/// Pre-FFN RMS norm. Returns the vector the gate/up matvecs consume.
+#[tile(kind = iter, description = "RMS-normalise before the MLP")]
+pub fn pre_ff_norm(attn: PackedVec, params: LayerParams) -> PackedVec {
+    if !attn.error.is_empty() {
+        return PackedVec {
+            values: pack_i32s(&vec![0; params.hidden_size as usize]),
+            error: attn.error,
+        };
+    }
+    match pre_ff_norm_inner(&attn, &params) {
+        Ok(values) => PackedVec {
+            values: pack_i32s(&values),
+            error: String::new(),
+        },
+        Err(error) => PackedVec {
+            values: pack_i32s(&vec![0; params.hidden_size as usize]),
+            error,
+        },
+    }
+}
+
+fn pre_ff_norm_inner(
+    attn: &PackedVec,
+    params: &LayerParams,
+) -> core::result::Result<Vec<i32>, String> {
+    let mut normed = unpack_i32s(&attn.values)?;
+    rms_norm(
+        &mut normed,
+        &unpack_i32s(&params.norm_pre_ffw)?,
+        params.norm_eps,
+    )?;
+    Ok(normed)
+}
+
+/// `gelu(gate) ⊙ up`.
+#[tile(kind = iter, description = "Elementwise GELU(gate) * up")]
+pub fn gelu_mul(gate: ProjAccum, up: ProjAccum) -> PackedVec {
+    if !gate.error.is_empty() {
+        return PackedVec {
+            values: pack_i32s(&[]),
+            error: gate.error,
+        };
+    }
+    if !up.error.is_empty() {
+        return PackedVec {
+            values: pack_i32s(&[]),
+            error: up.error,
+        };
+    }
+    match gelu_mul_inner(&gate, &up) {
+        Ok(values) => PackedVec {
+            values: pack_i32s(&values),
+            error: String::new(),
+        },
+        Err(error) => PackedVec {
+            values: pack_i32s(&[]),
+            error,
+        },
+    }
+}
+
+fn gelu_mul_inner(
+    gate: &ProjAccum,
+    up: &ProjAccum,
+) -> core::result::Result<Vec<i32>, String> {
+    let mut gate = unpack_i32s(&gate.values)?;
+    let up = unpack_i32s(&up.values)?;
+    if gate.len() != up.len() {
+        return Err(alloc::format!(
+            "gate/up width mismatch: {} vs {}",
+            gate.len(),
+            up.len()
+        ));
+    }
+    for (value, up_value) in gate.iter_mut().zip(&up) {
+        *value = mul(gelu(*value), *up_value);
+    }
+    Ok(gate)
+}
+
+/// Post-FFN RMS norm, residual add, optional layer scalar, append the row.
+#[tile(kind = iter, description = "Finish the MLP and append the layer output row")]
+pub fn finish_mlp(
     output: Draft<ActivationSequence>,
-    query: AttnQuery,
-    attn: AttnOutput,
+    query: QueryRow,
+    residual: PackedVec,
+    ff_in: PackedVec,
+    ff: ProjAccum,
     params: LayerParams,
+    own_key: KeyRow,
 ) -> Draft<ActivationSequence> {
     let mut output = output;
-    match mlp_row(&attn, &params) {
+    match finish_mlp_inner(&residual, &ff_in, &ff, &params) {
         Ok(values) => output.rows().push(ActivationRow {
             token_id: query.token_id,
-            values_hex: pack_hex(&values),
+            values: pack_i32s(&values),
         }),
         Err(error) => output
             .errors()
             .push(alloc::format!("token at position {}: {error}", query.position)),
     }
+    // Publish this layer's own cache entry alongside the row. Only layers 13
+    // and 14 are ever read back, but the type is uniform across all 35 stages,
+    // so every layer carries its own — the alternative is a second program.
+    output.kv().push(own_key);
     output
 }
 
-fn mlp_row(attn: &AttnOutput, params: &LayerParams) -> core::result::Result<Vec<i32>, String> {
-    if !attn.error.is_empty() {
-        return Err(attn.error.clone());
+fn finish_mlp_inner(
+    residual: &PackedVec,
+    ff_in: &PackedVec,
+    ff: &ProjAccum,
+    params: &LayerParams,
+) -> core::result::Result<Vec<i32>, String> {
+    if !residual.error.is_empty() {
+        return Err(residual.error.clone());
     }
-    let residual = unpack_hex(&attn.values_hex)?;
-    let hidden = params.hidden_size as usize;
-    let ffn = params.ffn_size as usize;
-
-    let mut normed = residual.clone();
-    rms_norm(
-        &mut normed,
-        &unpack_hex(&params.norm_pre_ffw_hex)?,
-        params.norm_eps,
-    )?;
-
-    let mut gate = matvec(&normed, &unpack_hex(&params.w_gate_hex)?, ffn)?;
-    let up = matvec(&normed, &unpack_hex(&params.w_up_hex)?, ffn)?;
-    for (value, up_value) in gate.iter_mut().zip(&up) {
-        *value = mul(gelu(*value), *up_value);
+    if !ff_in.error.is_empty() {
+        return Err(ff_in.error.clone());
     }
-
-    let mut ff = matvec(&gate, &unpack_hex(&params.w_down_hex)?, hidden)?;
+    if !ff.error.is_empty() {
+        return Err(ff.error.clone());
+    }
+    let residual_vals = unpack_i32s(&residual.values)?;
+    let mut ff = unpack_i32s(&ff.values)?;
     rms_norm(
         &mut ff,
-        &unpack_hex(&params.norm_post_ffw_hex)?,
+        &unpack_i32s(&params.norm_post_ffw)?,
         params.norm_eps,
     )?;
-    add_row(&mut ff, &residual)?;
+    add_row(&mut ff, &residual_vals)?;
     if params.layer_scalar != 0 {
         scale_row(&mut ff, params.layer_scalar);
     }
@@ -424,7 +738,6 @@ fn mlp_row(attn: &AttnOutput, params: &LayerParams) -> core::result::Result<Vec<
 // Failure accounting
 // ---------------------------------------------------------------------------
 
-/// Folds a list of recorded failures into a count plus the first message.
 #[tile(kind = recur, description = "Summarise the rows this layer could not produce")]
 pub fn summarise_errors(
     input: RecurInput<String>,
@@ -439,8 +752,6 @@ pub fn summarise_errors(
     state
 }
 
-/// Fails the program when either pass dropped a row, so a short layer output is
-/// never published as an authorized output.
 #[tile(kind = iter, description = "Reject an incomplete layer output")]
 pub fn assert_layer_complete(
     projection_errors: u32,

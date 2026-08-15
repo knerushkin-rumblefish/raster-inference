@@ -1,17 +1,13 @@
 //! Phase 5 — `prefill-finalize`: tiles.
 //!
-//! The output head, following `det_kernels::det_hidden_to_logits`:
-//!
 //! ```text
 //!   position = last row of the prompt's activations
 //!   normed   = rms_norm(position, w_final)
 //!   logit[t] = softcap(normed · projection[t])
 //! ```
 //!
-//! Unlike the layer stages this one has no per-layer expansion — there is one
-//! output head — and its loop is a single level: the projection is walked once,
-//! one `Block` of vocabulary rows per replay unit, with the normalised position
-//! as a scalar argument.
+//! The projection is a paged byte region; each replay unit scores one page of
+//! vocabulary rows. `token_id` is `page.offset() / (hidden * 4) + local_row`.
 //!
 //! `#![no_std]` so the same tiles compile into RISC0 replay guests.
 
@@ -24,7 +20,6 @@ use raster::prelude::*;
 
 pub mod input;
 
-// The glob also brings the derive-generated `…DraftExt` traits into scope.
 use input::*;
 
 /// Guards the head external before any of it is used.
@@ -41,21 +36,28 @@ pub fn validate_final_head(params: FinalHeadParams) -> Result<FinalHeadParams> {
             "final logit softcap must be non-negative (0 disables it)",
         ));
     }
-    let expected = (params.hidden_size * HEX_CHARS_PER_VALUE) as usize;
-    if params.norm_weights_hex.len() != expected {
+    let expected = params.hidden_size as usize * 4;
+    if params.norm_weights.len() != expected {
         return Err(alloc::format!(
-            "final norm weights have {} hex chars, expected {expected}",
-            params.norm_weights_hex.len()
+            "final norm weights have {} bytes, expected {expected}",
+            params.norm_weights.len()
         ));
     }
     Ok(params)
 }
 
+/// Empty last-position state, for the sequence to bind before the fold.
+#[tile(kind = iter, description = "Empty final-position accumulator")]
+pub fn empty_final_position() -> FinalPosition {
+    FinalPosition {
+        found: false,
+        token_id: 0,
+        token_count: 0,
+        values: pack_i32s(&[]),
+    }
+}
+
 /// Walks the prompt to its last position, counting as it goes.
-///
-/// A fold, because `select!` takes literal indexes only: "the last row" is not
-/// addressable, so the state keeps overwriting until the loop ends. The count
-/// it accumulates is the decode position.
 #[tile(kind = recur, description = "Track the prompt's final position")]
 pub fn track_final_position(
     input: RecurInput<ActivationRow>,
@@ -66,7 +68,7 @@ pub fn track_final_position(
     state.found = true;
     state.token_id = row.token_id;
     state.token_count += 1;
-    state.values_hex = row.values_hex;
+    state.values = row.values;
     state
 }
 
@@ -81,7 +83,7 @@ pub fn normalize_final_position(
             "prefill produced no activation rows; there is no final position to score",
         ));
     }
-    let mut values = unpack_hex(&position.values_hex)?;
+    let mut values = unpack_i32s(&position.values)?;
     if values.len() != params.hidden_size as usize {
         return Err(alloc::format!(
             "final position has {} values, expected hidden_size {}",
@@ -91,18 +93,15 @@ pub fn normalize_final_position(
     }
     rms_norm(
         &mut values,
-        &unpack_hex(&params.norm_weights_hex)?,
+        &unpack_i32s(&params.norm_weights)?,
         params.norm_eps,
     )?;
     Ok(NormalizedPosition {
-        values_hex: pack_hex(&values),
+        values: pack_i32s(&values),
     })
 }
 
 /// Seeds the output draft with the position decoding resumes from.
-///
-/// Set-once, so it is written before the loop and the draft is threaded in as
-/// the loop's `output`.
 #[tile(kind = iter, description = "Open the logits draft at the decode position")]
 pub fn begin_logits(
     output: Draft<PrefillLogits>,
@@ -113,45 +112,68 @@ pub fn begin_logits(
     output
 }
 
-/// Scores one `Block` of the vocabulary: a dot product per row, then softcap.
-///
-/// The projection is the largest collection in a model, and it is the recur
-/// `input` here — one chunk per replay unit, with the normalised position
-/// riding along as a small scalar argument.
+/// Scores one page of the vocabulary: a dot product per row, then softcap.
 #[tile(
     kind = recur,
-    description = "Score one chunk of the vocabulary",
-    estimated_cycles = 30000
+    description = "Score one page of the vocabulary",
+    estimated_cycles = 800_000
 )]
-pub fn project_logit_chunk(
-    input: RecurInput<Block<LogitRow>>,
+pub fn project_logit_page(
+    input: RecurInput<BytesPage>,
     output: RecurOutput<PrefillLogits>,
     normalized: NormalizedPosition,
     params: FinalHeadParams,
 ) -> RecurOutput<PrefillLogits> {
     let mut output = output;
-    let position = match unpack_hex(&normalized.values_hex) {
+    let position = match unpack_i32s(&normalized.values) {
         Ok(values) => values,
         Err(error) => {
             output.errors().push(error);
             return output;
         }
     };
+    let hidden = params.hidden_size as usize;
+    if position.len() != hidden {
+        output.errors().push(alloc::format!(
+            "normalised position has {} values, expected {hidden}",
+            position.len()
+        ));
+        return output;
+    }
 
-    for row in input.into_value() {
-        match unpack_hex(&row.values_hex) {
-            Ok(weights) => match dot(&position, &weights) {
-                Ok(value) => output.logits().push(LogitEntry {
-                    token_id: row.token_id,
-                    value: softcap(value, params.softcap),
-                }),
-                Err(error) => output
-                    .errors()
-                    .push(alloc::format!("token {}: {error}", row.token_id)),
-            },
+    let page = input.into_value();
+    let weights = match unpack_i32s(&page) {
+        Ok(values) => values,
+        Err(error) => {
+            output.errors().push(error);
+            return output;
+        }
+    };
+    if hidden == 0 || weights.len() % hidden != 0 {
+        output.errors().push(alloc::format!(
+            "projection page at offset {} is not a whole number of hidden-width rows",
+            page.offset()
+        ));
+        return output;
+    }
+    let stride = hidden as u64 * 4;
+    if page.offset() % stride != 0 {
+        output.errors().push(String::from(
+            "projection page offset is not row-aligned",
+        ));
+        return output;
+    }
+    let first_id = (page.offset() / stride) as u32;
+    for (local, row) in weights.chunks_exact(hidden).enumerate() {
+        let token_id = first_id + local as u32;
+        match dot(&position, row) {
+            Ok(value) => output.logits().push(LogitEntry {
+                token_id,
+                value: softcap(value, params.softcap),
+            }),
             Err(error) => output
                 .errors()
-                .push(alloc::format!("token {}: {error}", row.token_id)),
+                .push(alloc::format!("token {token_id}: {error}")),
         }
     }
     output
@@ -172,8 +194,7 @@ pub fn summarise_errors(
     state
 }
 
-/// Fails the program when any vocabulary row went unscored: a logit vector
-/// with holes would silently change which token wins.
+/// Fails the program when any vocabulary row went unscored.
 #[tile(kind = iter, description = "Reject an incomplete logit vector")]
 pub fn assert_logits_complete(error_count: u32, first_error: String) -> Result<u32> {
     if error_count == 0 {

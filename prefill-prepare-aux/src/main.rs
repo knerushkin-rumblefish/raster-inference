@@ -1,13 +1,9 @@
 //! Phase 3 — `prefill-prepare-aux`: sequences.
 //!
 //! ```text
-//!   tokens ──recur seq──▶ [ task · scan PLE table · project · combine ] ──▶ PleLayerInputs
+//!   tokens ──recur seq──▶ [ page_of · project pages · combine ] ──▶ PleLayerInputs
 //!   misses ──recur─────▶ count ──▶ assert none
 //! ```
-//!
-//! One stage instance per PLE layer: the layer's parameters and PLE table are
-//! its committed external, and the prompt activations come `from` the
-//! `input_embedding` stage.
 
 use raster::prelude::*;
 
@@ -20,57 +16,62 @@ use prefill_prepare_aux::*;
 fn prepare_ple_row(
     input: RecurSequenceInput<ActivationRow>,
     output: RecurSequenceOutput<PleLayerInputs>,
-    embedding_rows: List<PleEmbeddingRow>,
+    embeddings: Bytes<196_608>,
+    projection_pages: List<BytesPage>,
     params: PleLayerParams,
-    ple_width: u32,
+    page_size: u64,
 ) -> RecurSequenceOutput<PleLayerInputs> {
     let task = call!(begin_ple_task, input);
-
-    let hit = call_recur!(
-        tile = scan_ple_embeddings,
-        input = embedding_rows,
-        chunk = 4,
-        state = PleEmbeddingMatch {
-            found: false,
-            values_hex: String::new()
-        },
-        args = (task.clone(), ple_width)
+    let token_id = select!(u32, task.clone().token_id);
+    let ple_width = call!(ple_width_of, params.clone());
+    let hidden = call!(ple_hidden, params.clone());
+    let byte_off = call!(ple_byte_offset, token_id, ple_width.clone());
+    let page_idx = call!(page_of, byte_off.clone(), page_size);
+    let emb_page = select!(BytesPage, embeddings[page_idx]);
+    let acc = call!(zero_accum, ple_width);
+    let activation = call!(ple_activation, task.clone());
+    let projected = call_recur!(
+        tile = mac_weight_page,
+        input = projection_pages,
+        state = acc,
+        args = (activation, hidden)
     );
-
-    let projected = call!(project_activation_row, task.clone(), params.clone());
-
-    call!(combine_ple_row, output, task, hit, projected, params)
+    let projected = call!(finish_ple_projection, projected, params.clone());
+    call!(
+        combine_ple_row,
+        output,
+        task,
+        emb_page,
+        byte_off,
+        projected,
+        params
+    )
 }
 
 /// Phase 3 entrypoint, for one PLE layer.
-///
-/// `embedded` is bound by the chain to `input_embedding`'s authorized output;
-/// `layer` is this stage instance's committed external. The return value is
-/// this layer's prefill input rows.
 #[sequence]
 fn main(embedded: ActivationSequence, layer: PleLayer) -> Result<PleLayerInputs> {
     let params = select!(PleLayerParams, layer.clone().params);
     let params = call!(validate_layer_params, params)?;
-    let ple_width = select!(u32, params.clone().ple_width);
+    let page_size = select!(u64, layer.clone().embeddings.page_size);
+    let embeddings = select!(Bytes<196_608>, layer.clone().embeddings);
+    let proj_len = select!(u64, layer.clone().projection.byte_len);
+    let projection_pages = select!(List<BytesPage>, layer.projection.pages);
+    let hidden = call!(ple_hidden, params.clone());
+    let ple_width = call!(ple_width_of, params.clone());
+    call!(assert_matrix_bytes, proj_len, ple_width, hidden)?;
 
     let tokens = select!(List<ActivationRow>, embedded.rows);
-    let embedding_rows = select!(List<PleEmbeddingRow>, layer.embedding_rows);
-
-    // `layer_idx` is set once, before the loop, and the draft is threaded in as
-    // the loop's output — a recur step has no way to write a scalar field only
-    // on the first iteration and stay set-once correct.
     let draft = call!(begin_ple_layer, new!(PleLayerInputs), params.clone());
 
     let prepared = call_recur_seq!(
         sequence = prepare_ple_row,
         input = tokens,
         output = draft,
-        args = (embedding_rows, params, ple_width)
+        args = (embeddings, projection_pages, params, page_size)
     );
     raster::println!("prefill aux pass → {:?}", prepared);
 
-    // A failed row cannot fail the recur sequence itself, so the failures are
-    // collected as data, folded, and checked here.
     let errors = select!(List<String>, prepared.clone().errors);
     let summary = call_recur!(
         tile = summarise_layer_errors,
