@@ -70,26 +70,45 @@ fn attend_token(
     w_gate: List<BytesPage>,
     w_up: List<BytesPage>,
     w_down: List<BytesPage>,
+    ple_rows: List<PleRow>,
+    ple_input_gate: List<BytesPage>,
+    ple_layer_projection: List<BytesPage>,
 ) -> RecurSequenceOutput<ActivationSequence> {
     let query = call!(begin_attention, input);
-    let attn_state = call!(zero_attn_state);
-    // Both key sets are swept and exactly one contributes — `attend_kv_chunk`
-    // drops every row whose pass does not match `kv_donor_layer`. A sequence
-    // cannot branch, and chaining the state through two sweeps is equivalent to
-    // one sweep over whichever list applies.
-    let attended = call_recur!(
-        tile = attend_kv_chunk,
+    // Attention in two passes, matching the reference: score every visible key,
+    // softmax once over the whole window, then accumulate the weighted values in
+    // `Acc` precision and requantize once. Each pass sweeps both key lists and
+    // exactly one contributes, since a sequence cannot branch on
+    // `kv_donor_layer`.
+    let scores = call!(zero_scores);
+    let scores = call_recur!(
+        tile = score_key,
         input = keys.clone(),
-        state = attn_state,
+        state = scores,
         args = (query.clone(), params.clone(), false)
     );
-    let attended = call_recur!(
-        tile = attend_kv_chunk,
-        input = donor_keys,
-        state = attended,
+    let scores = call_recur!(
+        tile = score_key,
+        input = donor_keys.clone(),
+        state = scores,
         args = (query.clone(), params.clone(), true)
     );
-    let context = call!(softmax_context, attended, params.clone());
+    let weights = call!(softmax_scores, scores, params.clone());
+
+    let context_acc = call!(zero_context, params.clone());
+    let context_acc = call_recur!(
+        tile = accumulate_context,
+        input = keys.clone(),
+        state = context_acc,
+        args = (query.clone(), weights.clone(), params.clone(), false)
+    );
+    let context_acc = call_recur!(
+        tile = accumulate_context,
+        input = donor_keys,
+        state = context_acc,
+        args = (query.clone(), weights, params.clone(), true)
+    );
+    let context = call!(finish_context, context_acc);
     let context_values = call!(packed_values, context.clone());
     let q_len = call!(q_out_len, params.clone());
     let hidden = call!(hidden_of, params.clone());
@@ -126,6 +145,7 @@ fn attend_token(
     );
     let gated = call!(gelu_mul, gate, up);
     let gated_values = call!(packed_values, gated);
+    let hidden_out = call!(hidden_of, params.clone());
     let acc_down = call!(zero_accum, hidden);
     let ff = call_recur!(
         tile = mac_weight_page,
@@ -133,21 +153,40 @@ fn attend_token(
         state = acc_down,
         args = (gated_values, ffn)
     );
+    let xs = call!(finish_mlp, residual, ff_in, ff, params.clone());
+
+    // Gemma 3n's per-layer-embedding block, applied after the MLP residual and
+    // before `layer_scalar`. `prefill_prepare_aux_lN` built one row per token
+    // for this layer; `ple_rows` is in prompt order, so the row for this token
+    // is an authorized dynamic index on its position — the same alignment the
+    // key lookup below relies on.
+    let position = select!(u32, query.clone().position);
+    let ple_row = select!(PleRow, ple_rows[position]);
+    let xs_values = call!(packed_values, xs.clone());
+    let ple_width = call!(ple_width_of, params.clone());
+    let hidden_ple = call!(hidden_of, params.clone());
+    let gate_acc = call!(zero_accum, ple_width.clone());
+    let gate = call_recur!(
+        tile = mac_weight_page,
+        input = ple_input_gate,
+        state = gate_acc,
+        args = (xs_values, hidden_ple)
+    );
+    let gated = call!(ple_gate_mul, gate, ple_row);
+    let gated_values = call!(packed_values, gated);
+    let proj_acc = call!(zero_accum, hidden_out);
+    let projected = call_recur!(
+        tile = mac_weight_page,
+        input = ple_layer_projection,
+        state = proj_acc,
+        args = (gated_values, ple_width)
+    );
+
     // This token's own cache entry, fetched by an authorized dynamic index:
     // `keys` is built in prompt order by pass 1, so it is index-aligned with
     // the query's position.
-    let position = select!(u32, query.clone().position);
     let own_key = select!(KeyRow, keys[position]);
-    call!(
-        finish_mlp,
-        output,
-        query,
-        residual,
-        ff_in,
-        ff,
-        params,
-        own_key
-    )
+    call!(finish_layer, output, query, xs, projected, params, own_key)
 }
 
 /// Phase 4 entrypoint, for one transformer layer.
@@ -156,6 +195,7 @@ fn main(
     activations: ActivationSequence,
     layer: TransformerLayer,
     donor_kv: ActivationSequence,
+    ple: PleLayerInputs,
 ) -> Result<ActivationSequence> {
     let params = select!(LayerParams, layer.clone().params);
     let params = call!(validate_layer_params, params)?;
@@ -204,11 +244,26 @@ fn main(
     // all 35 stages of this one program.
     let donor_keys = select!(List<KeyRow>, donor_kv.kv);
 
+    let ple_rows = select!(List<PleRow>, ple.rows);
+    let ple_input_gate = select!(List<BytesPage>, layer.clone().ple_input_gate.pages);
+    let ple_layer_projection = select!(List<BytesPage>, layer.ple_layer_projection.pages);
+
     let prepared = call_recur_seq!(
         sequence = attend_token,
         input = queries,
         output = new!(ActivationSequence),
-        args = (keys, donor_keys, params, w_o, w_gate, w_up, w_down)
+        args = (
+            keys,
+            donor_keys,
+            params,
+            w_o,
+            w_gate,
+            w_up,
+            w_down,
+            ple_rows,
+            ple_input_gate,
+            ple_layer_projection
+        )
     );
     raster::println!("prefill range pass → {:?}", prepared);
 

@@ -210,7 +210,9 @@ pub fn combine_ple_row(
 ) -> Draft<PleLayerInputs> {
     let mut output = output;
     match combine_row(&task, &emb_page, byte_off, &projected, &params) {
-        Ok(values) => output.rows().push(pack_i32s(&values)),
+        Ok(values) => output.rows().push(PleRow {
+            values: pack_i32s(&values),
+        }),
         Err(error) => output.errors().push(error),
     }
     output

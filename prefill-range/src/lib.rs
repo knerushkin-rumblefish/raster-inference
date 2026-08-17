@@ -14,7 +14,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use det_num::ops::rope_rotate_pairs_in_place;
+use det_num::ops::{attention_softmax, mac_bits, requantize, rope_rotate_pairs_in_place};
 use det_num::{Acc, Act};
 use raster::prelude::*;
 
@@ -341,7 +341,7 @@ fn finish_qkv_inner(
     }
     let mut q = unpack_i32s(&q.values)?;
     let mut k = unpack_i32s(&k.values)?;
-    let v = unpack_i32s(&v.values)?;
+    let mut v = unpack_i32s(&v.values)?;
     let head_dim = params.head_dim as usize;
     let q_norm = unpack_i32s(&params.q_norm)?;
     let k_norm = unpack_i32s(&params.k_norm)?;
@@ -355,6 +355,11 @@ fn finish_qkv_inner(
     for head in k.chunks_mut(head_dim) {
         rms_norm(head, &k_norm, params.norm_eps)?;
         apply_rope(head, params, position);
+    }
+    // Values are normalised too, weightlessly, and are *not* rotated — RoPE is
+    // a query/key-space operation. This step was missing entirely.
+    for head in v.chunks_mut(head_dim) {
+        value_rms_norm(head, params.norm_eps)?;
     }
     Ok((
         QueryRow {
@@ -379,6 +384,245 @@ fn finish_qkv_inner(
 #[tile(kind = iter, description = "Open one token's attention query")]
 pub fn begin_attention(row: QueryRow) -> QueryRow {
     row
+}
+
+// ---------------------------------------------------------------------------
+// Attention — two passes, matching the reference exactly
+//
+// The reference computes, per (head, query): all visible logits, then one
+// softmax over them, then a weighted sum accumulated in `Acc` and requantized
+// once. A streaming/online softmax is mathematically equivalent but rounds
+// differently at every step, so it cannot be bit-equal. Hence two passes.
+// ---------------------------------------------------------------------------
+
+#[tile(kind = iter, description = "Empty attention score accumulator")]
+pub fn zero_scores() -> ScoreAccum {
+    ScoreAccum {
+        scores: pack_i32s(&[]),
+        count: 0,
+        error: String::new(),
+    }
+}
+
+/// Appends one visible key's per-head scores.
+#[tile(
+    kind = recur,
+    description = "Score one key against the query, for every head",
+    estimated_cycles = 30000
+)]
+pub fn score_key(
+    input: RecurInput<KeyRow>,
+    state: RecurState<ScoreAccum>,
+    query: QueryRow,
+    params: LayerParams,
+    donor_pass: bool,
+) -> RecurState<ScoreAccum> {
+    let mut state = state;
+    if !state.error.is_empty() {
+        return state;
+    }
+    if (params.kv_donor_layer >= 0) != donor_pass {
+        return state;
+    }
+    let key = input.into_value();
+    if !visible(query.position, key.position, params.sliding_window) {
+        return state;
+    }
+    if let Err(error) = push_scores(&mut state, &query, &key, &params) {
+        state.error = error;
+    }
+    state
+}
+
+fn push_scores(
+    state: &mut ScoreAccum,
+    query: &QueryRow,
+    key: &KeyRow,
+    params: &LayerParams,
+) -> core::result::Result<(), String> {
+    let head_dim = params.head_dim as usize;
+    let heads = params.num_heads as usize;
+    let kv_heads = params.num_kv_heads as usize;
+    let group = heads / kv_heads.max(1);
+    let q = unpack_i32s(&query.q)?;
+    let k = unpack_i32s(&key.k)?;
+    let mut scores = unpack_i32s(&state.scores)?;
+    for head in 0..heads {
+        let kv_head = head / group.max(1);
+        let q_head = &q[head * head_dim..(head + 1) * head_dim];
+        let k_head = &k[kv_head * head_dim..(kv_head + 1) * head_dim];
+        scores.push(dot(q_head, k_head)?);
+    }
+    state.scores = pack_i32s(&scores);
+    state.count += 1;
+    Ok(())
+}
+
+/// One softmax per head over that head's visible logits.
+#[tile(kind = iter, description = "Softmax the per-head score lists")]
+pub fn softmax_scores(state: ScoreAccum, params: LayerParams) -> WeightVec {
+    match softmax_scores_inner(&state, &params) {
+        Ok(values) => WeightVec {
+            weights: pack_i32s(&values),
+            count: state.count,
+            error: String::new(),
+        },
+        Err(error) => WeightVec {
+            weights: pack_i32s(&[]),
+            count: 0,
+            error,
+        },
+    }
+}
+
+fn softmax_scores_inner(
+    state: &ScoreAccum,
+    params: &LayerParams,
+) -> core::result::Result<Vec<i32>, String> {
+    if !state.error.is_empty() {
+        return Err(state.error.clone());
+    }
+    if state.count == 0 {
+        return Err(String::from("attention saw no keys at or before this token"));
+    }
+    let heads = params.num_heads as usize;
+    let count = state.count as usize;
+    let scores = unpack_i32s(&state.scores)?;
+    if scores.len() != heads * count {
+        return Err(alloc::format!(
+            "score list has {} entries, expected {}",
+            scores.len(),
+            heads * count
+        ));
+    }
+    let mut out = scores.clone();
+    let mut logits: Vec<Act> = Vec::with_capacity(count);
+    for head in 0..heads {
+        logits.clear();
+        for key in 0..count {
+            logits.push(Act::from_bits(scores[key * heads + head]));
+        }
+        let weights = attention_softmax(&logits);
+        for (key, weight) in weights.iter().enumerate() {
+            out[key * heads + head] = weight.to_bits();
+        }
+    }
+    Ok(out)
+}
+
+#[tile(kind = iter, description = "Zero a weighted-sum accumulator")]
+pub fn zero_context(params: LayerParams) -> CtxAccum {
+    CtxAccum {
+        acc: pack_i64s(&vec![0; (params.num_heads * params.head_dim) as usize]),
+        error: String::new(),
+    }
+}
+
+/// Folds one visible key's value row into the context, weighted.
+#[tile(
+    kind = recur,
+    description = "Accumulate one weighted value row",
+    estimated_cycles = 30000
+)]
+pub fn accumulate_context(
+    input: RecurInput<KeyRow>,
+    state: RecurState<CtxAccum>,
+    query: QueryRow,
+    weights: WeightVec,
+    params: LayerParams,
+    donor_pass: bool,
+) -> RecurState<CtxAccum> {
+    let mut state = state;
+    if !state.error.is_empty() {
+        return state;
+    }
+    if (params.kv_donor_layer >= 0) != donor_pass {
+        return state;
+    }
+    let index = input.index() as usize;
+    let key = input.into_value();
+    if !visible(query.position, key.position, params.sliding_window) {
+        return state;
+    }
+    if let Err(error) = accumulate_weighted(&mut state, index, &key, &weights, &query, &params) {
+        state.error = error;
+    }
+    state
+}
+
+fn accumulate_weighted(
+    state: &mut CtxAccum,
+    index: usize,
+    key: &KeyRow,
+    weights: &WeightVec,
+    query: &QueryRow,
+    params: &LayerParams,
+) -> core::result::Result<(), String> {
+    if !weights.error.is_empty() {
+        return Err(weights.error.clone());
+    }
+    let head_dim = params.head_dim as usize;
+    let heads = params.num_heads as usize;
+    let kv_heads = params.num_kv_heads as usize;
+    let group = heads / kv_heads.max(1);
+    // The visible window is a contiguous run ending at this query, so the
+    // weight slot is the key's offset from the window start — the same
+    // arithmetic the reference uses to size its window.
+    let start = window_start(query.position, params.sliding_window) as usize;
+    let slot = index
+        .checked_sub(start)
+        .ok_or_else(|| String::from("visible key precedes the attention window"))?;
+    if slot >= weights.count as usize {
+        return Err(String::from("visible key falls outside the weight list"));
+    }
+    let w = unpack_i32s(&weights.weights)?;
+    let v = unpack_i32s(&key.v)?;
+    let mut acc = unpack_i64s(&state.acc)?;
+    for head in 0..heads {
+        let kv_head = head / group.max(1);
+        let weight = w[slot * heads + head];
+        let v_head = &v[kv_head * head_dim..(kv_head + 1) * head_dim];
+        for (lane, value) in v_head.iter().enumerate() {
+            let dst = &mut acc[head * head_dim + lane];
+            *dst = mac_bits(*dst, weight, *value);
+        }
+    }
+    state.acc = pack_i64s(&acc);
+    Ok(())
+}
+
+/// Requantizes the accumulated context — once, as the reference does.
+#[tile(kind = iter, description = "Requantize the attention context")]
+pub fn finish_context(state: CtxAccum) -> PackedVec {
+    if !state.error.is_empty() {
+        return PackedVec {
+            values: pack_i32s(&[]),
+            error: state.error,
+        };
+    }
+    match unpack_i64s(&state.acc) {
+        Ok(acc) => PackedVec {
+            values: pack_i32s(
+                &acc.iter()
+                    .map(|bits| requantize(Acc::from_bits(*bits)).to_bits())
+                    .collect::<Vec<i32>>(),
+            ),
+            error: String::new(),
+        },
+        Err(error) => PackedVec {
+            values: pack_i32s(&[]),
+            error,
+        },
+    }
+}
+
+/// First visible key position for a query under the sliding window.
+fn window_start(query_position: u32, sliding_window: u32) -> u32 {
+    if sliding_window == 0 {
+        0
+    } else {
+        query_position.saturating_add(1).saturating_sub(sliding_window)
+    }
 }
 
 #[tile(kind = iter, description = "Empty streaming-softmax state")]
@@ -476,7 +720,14 @@ fn accumulate_key(
         let q_head = &q[head * head_dim..(head + 1) * head_dim];
         let k_head = &k[kv_head * head_dim..(kv_head + 1) * head_dim];
         let v_head = &v[kv_head * head_dim..(kv_head + 1) * head_dim];
-        let score = mul(dot(q_head, k_head)?, params.attn_scale);
+        // No attention scale. The reference's `attention_output_into` computes
+        // `logits[j] = requantize(dot(query, key))` with no scaling at all —
+        // grepping the whole reference for `sqrt(head_dim)`, `query_pre_attn`
+        // or `attn_scale` finds nothing. Gemma 3n folds the scaling elsewhere,
+        // so applying `1/sqrt(head_dim)` here was an extra operation the model
+        // does not perform. `attn_scale` stays on `LayerParams` until the next
+        // fixture regeneration retires it.
+        let score = dot(q_head, k_head)?;
         let slot = &mut acc[head * head_dim..(head + 1) * head_dim];
 
         if !state.started {
@@ -678,18 +929,89 @@ fn gelu_mul_inner(
 }
 
 /// Post-FFN RMS norm, residual add, optional layer scalar, append the row.
-#[tile(kind = iter, description = "Finish the MLP and append the layer output row")]
+#[tile(kind = iter, description = "Post-MLP residual, before the per-layer-embedding block")]
 pub fn finish_mlp(
-    output: Draft<ActivationSequence>,
-    query: QueryRow,
     residual: PackedVec,
     ff_in: PackedVec,
     ff: ProjAccum,
     params: LayerParams,
+) -> PackedVec {
+    match finish_mlp_inner(&residual, &ff_in, &ff, &params) {
+        Ok(values) => PackedVec {
+            values: pack_i32s(&values),
+            error: String::new(),
+        },
+        Err(error) => PackedVec {
+            values: pack_i32s(&[]),
+            error,
+        },
+    }
+}
+
+/// Width of this layer's per-layer-embedding vector.
+#[tile(kind = iter, description = "Per-layer-embedding width")]
+pub fn ple_width_of(params: LayerParams) -> u32 {
+    params.ple_width
+}
+
+/// `gelu(gate) * per_layer_input`, elementwise at `ple_width`.
+///
+/// The middle of Gemma 3n's per-layer-embedding block: the layer gates itself on
+/// its own activations, then multiplies in the embedding that
+/// `prefill_prepare_aux` built for this token and this layer.
+#[tile(kind = iter, description = "Gate the per-layer embedding into the layer")]
+pub fn ple_gate_mul(gate: ProjAccum, per_layer_input: PleRow) -> PackedVec {
+    match ple_gate_mul_inner(&gate, &per_layer_input) {
+        Ok(values) => PackedVec {
+            values: pack_i32s(&values),
+            error: String::new(),
+        },
+        Err(error) => PackedVec {
+            values: pack_i32s(&[]),
+            error,
+        },
+    }
+}
+
+fn ple_gate_mul_inner(
+    gate: &ProjAccum,
+    per_layer_input: &PleRow,
+) -> core::result::Result<Vec<i32>, String> {
+    if !gate.error.is_empty() {
+        return Err(gate.error.clone());
+    }
+    let mut gated = unpack_i32s(&gate.values)?;
+    let ple = unpack_i32s(&per_layer_input.values)?;
+    if gated.len() != ple.len() {
+        return Err(alloc::format!(
+            "per-layer input has {} values, gate has {}",
+            ple.len(),
+            gated.len()
+        ));
+    }
+    for (slot, embedded) in gated.iter_mut().zip(ple.iter()) {
+        *slot = mul(gelu(*slot), *embedded);
+    }
+    Ok(gated)
+}
+
+/// Closes the layer: normalise the PLE projection, add it back to the
+/// post-MLP residual, then apply `layer_scalar`.
+///
+/// The ordering is the reference's and it matters — `layer_scalar` scales the
+/// layer's *final* output, after the per-layer embedding has been folded in,
+/// not the MLP result.
+#[tile(kind = iter, description = "Fold the per-layer embedding back in and close the layer")]
+pub fn finish_layer(
+    output: Draft<ActivationSequence>,
+    query: QueryRow,
+    xs: PackedVec,
+    projected: ProjAccum,
+    params: LayerParams,
     own_key: KeyRow,
 ) -> Draft<ActivationSequence> {
     let mut output = output;
-    match finish_mlp_inner(&residual, &ff_in, &ff, &params) {
+    match finish_layer_inner(&xs, &projected, &params) {
         Ok(values) => output.rows().push(ActivationRow {
             token_id: query.token_id,
             values: pack_i32s(&values),
@@ -698,11 +1020,33 @@ pub fn finish_mlp(
             .errors()
             .push(alloc::format!("token at position {}: {error}", query.position)),
     }
-    // Publish this layer's own cache entry alongside the row. Only layers 13
-    // and 14 are ever read back, but the type is uniform across all 35 stages,
-    // so every layer carries its own — the alternative is a second program.
     output.kv().push(own_key);
     output
+}
+
+fn finish_layer_inner(
+    xs: &PackedVec,
+    projected: &ProjAccum,
+    params: &LayerParams,
+) -> core::result::Result<Vec<i32>, String> {
+    if !xs.error.is_empty() {
+        return Err(xs.error.clone());
+    }
+    if !projected.error.is_empty() {
+        return Err(projected.error.clone());
+    }
+    let residual = unpack_i32s(&xs.values)?;
+    let mut out = unpack_i32s(&projected.values)?;
+    rms_norm(
+        &mut out,
+        &unpack_i32s(&params.ple_post_norm)?,
+        params.norm_eps,
+    )?;
+    add_row(&mut out, &residual)?;
+    if params.layer_scalar != 0 {
+        scale_row(&mut out, params.layer_scalar);
+    }
+    Ok(out)
 }
 
 fn finish_mlp_inner(
@@ -728,9 +1072,9 @@ fn finish_mlp_inner(
         params.norm_eps,
     )?;
     add_row(&mut ff, &residual_vals)?;
-    if params.layer_scalar != 0 {
-        scale_row(&mut ff, params.layer_scalar);
-    }
+    // `layer_scalar` deliberately does NOT go here: the reference applies it to
+    // the layer's final output, after the per-layer-embedding block. See
+    // `finish_layer_inner`.
     Ok(ff)
 }
 

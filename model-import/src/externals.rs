@@ -83,6 +83,7 @@ pub struct BpePieces {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
 pub struct EmbeddingTable {
     pub hidden_size: u32,
+    pub embedding_scale: i32,
     #[page_size = 196_608]
     pub values: Bytes<196_608>,
 }
@@ -134,6 +135,8 @@ pub struct LayerParams {
     pub norm_post_ffw: BytesPage,
     pub q_norm: BytesPage,
     pub k_norm: BytesPage,
+    pub ple_width: u32,
+    pub ple_post_norm: BytesPage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
@@ -153,6 +156,10 @@ pub struct TransformerLayer {
     pub w_up: Bytes<196_608>,
     #[page_size = 196_608]
     pub w_down: Bytes<196_608>,
+    #[page_size = 196_608]
+    pub ple_input_gate: Bytes<196_608>,
+    #[page_size = 196_608]
+    pub ple_layer_projection: Bytes<196_608>,
 }
 
 // --- prefill-finalize -------------------------------------------------------

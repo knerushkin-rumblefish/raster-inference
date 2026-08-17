@@ -51,6 +51,11 @@ struct Args {
     /// reason to re-emit the ~11 GB of tokenizer, embedding, PLE and head
     /// artifacts. Prints only the `prefill_range_*` stages.
     only_layers: bool,
+    /// Rewrite only the embedding external. Same reasoning as `--only-layers`:
+    /// nothing else depends on `EmbeddingTable`.
+    only_embedding: bool,
+    /// Rewrite only the PLE layer externals (`prefill-prepare-aux`).
+    only_ple: bool,
 }
 
 fn parse_args() -> Result<Args, Box<dyn Error>> {
@@ -58,6 +63,8 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
     let mut prompt = String::from("hello raster");
     let mut only_tokenizer = false;
     let mut only_layers = false;
+    let mut only_embedding = false;
+    let mut only_ple = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -65,6 +72,8 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
             "--prompt" => prompt = args.next().ok_or("--prompt needs a value")?,
             "--only-tokenizer" => only_tokenizer = true,
             "--only-layers" => only_layers = true,
+            "--only-embedding" => only_embedding = true,
+            "--only-ple" => only_ple = true,
             other => return Err(format!("unknown argument '{other}'").into()),
         }
     }
@@ -73,6 +82,8 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
         prompt,
         only_tokenizer,
         only_layers,
+        only_embedding,
+        only_ple,
     })
 }
 
@@ -99,6 +110,32 @@ fn run() -> Result<(), Box<dyn Error>> {
     let text = config
         .get("text_config")
         .ok_or("config.json has no text_config")?;
+
+    if args.only_ple {
+        let shape = Shape::from_config(text)?;
+        let mut stages = Vec::new();
+        write_ple_layers(&weights, &shape, &mut stages)?;
+        println!();
+        println!("# ---- replaces the prefill_prepare_aux_* stages in the root Raster.toml ----");
+        for stage in &stages {
+            println!();
+            print!("{stage}");
+        }
+        return Ok(());
+    }
+
+    if args.only_embedding {
+        let shape = Shape::from_config(text)?;
+        let mut stages = Vec::new();
+        write_embedding(&weights, &shape, &mut stages)?;
+        println!();
+        println!("# ---- replaces the input_embedding stage in the root Raster.toml ----");
+        for stage in &stages {
+            println!();
+            print!("{stage}");
+        }
+        return Ok(());
+    }
 
     if args.only_layers {
         let shape = Shape::from_config(text)?;
@@ -139,6 +176,13 @@ fn run() -> Result<(), Box<dyn Error>> {
         print!("{stage}");
     }
     Ok(())
+}
+
+/// Q16.16 bits of an `f32`, through the reference's own conversion so the
+/// committed scalar is the same value the deterministic path uses, not a
+/// near one.
+fn det_act_bits(value: f32) -> i32 {
+    raster_inference::shared::numerics::det_num::f32_to_act(value).to_bits()
 }
 
 fn as_f64(value: &serde_json::Value) -> Option<f64> {
@@ -305,11 +349,16 @@ impl Shape {
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0) as u32,
             layer_types,
-            norm_eps: f32_to_q16(
+            // `Acc` (Q32.32) bits, not Q16.16: the canonical `rms_norm` takes its
+            // epsilon in accumulator units. Encoded through the reference's own
+            // `f32_to_acc` so it is the same value, not a near one — 1e-6 in
+            // Q16.16 rounds to zero, which is how this was silently disabled.
+            norm_eps: raster_inference::shared::numerics::det_num::f32_to_acc(
                 text.get("rms_norm_eps")
                     .and_then(serde_json::Value::as_f64)
-                    .unwrap_or(1e-6),
-            ) as i64,
+                    .unwrap_or(1e-6) as f32,
+            )
+            .to_bits(),
         })
     }
 }
@@ -555,6 +604,13 @@ fn write_embedding(
     let commitment = write_external(
         &EmbeddingTable {
             hidden_size: shape.hidden as u32,
+            // Gemma scales token embeddings by sqrt(hidden) before layer 0. Converted
+            // by the reference's own `f32_to_act` so the committed bits match the
+            // deterministic path exactly rather than approximately.
+            embedding_scale: raster_inference::shared::numerics::det_num::f32_to_act(
+                (shape.hidden as f32).sqrt(),
+            )
+            .to_bits(),
             values: paged_i32s(&values).map_err(|error| error.to_string())?,
         },
         "input-embedding",
@@ -599,12 +655,14 @@ fn write_ple_layers(
                 layer_idx: layer_idx as u32,
                 hidden_size: shape.hidden as u32,
                 ple_width: shape.ple_width as u32,
-                // These three scalars are derived by the model loader rather
-                // than stored in the artifact; unit scaling keeps the import
-                // faithful to what the weights themselves say.
-                embedding_scale: ONE,
-                projection_scalar: ONE,
-                input_scale: ONE,
+                // Derived, not stored in the artifact — the comment this
+                // replaces claimed unit scaling was "faithful", but the model
+                // loader computes real values and hardcoding 1.0 silently
+                // dropped three scalings from every per-layer embedding
+                // (`casettek/.../gemma/io.rs:1176-1179`).
+                embedding_scale: det_act_bits((shape.ple_width as f32).sqrt()),
+                projection_scalar: det_act_bits((shape.hidden as f32).powf(-0.5)),
+                input_scale: det_act_bits(2f32.powf(-0.5)),
                 norm_eps: shape.norm_eps,
                 norm_weights: page_of_i32s(&projection_norm.values),
             },
@@ -737,6 +795,12 @@ fn write_transformer_layers(
                 ),
                 q_norm: page_of_i32s(&weights.get(&at("self_attn.q_norm.weight"))?.values),
                 k_norm: page_of_i32s(&weights.get(&at("self_attn.k_norm.weight"))?.values),
+                ple_width: shape.ple_width as u32,
+                // Hidden-width, despite the name: it normalises *after*
+                // `per_layer_projection` maps back up from `ple_width`.
+                ple_post_norm: page_of_i32s(
+                    &weights.get(&at("post_per_layer_input_norm.weight"))?.values,
+                ),
             },
             w_q: paged_i32s(&weights.get(&at("self_attn.q_proj.weight"))?.values)
                 .map_err(|error| error.to_string())?,
@@ -748,6 +812,12 @@ fn write_transformer_layers(
             w_gate: paged_i32s(&gate.values).map_err(|error| error.to_string())?,
             w_up: paged_i32s(&weights.get(&at("mlp.up_proj.weight"))?.values)
                 .map_err(|error| error.to_string())?,
+            ple_input_gate: paged_i32s(&weights.get(&at("per_layer_input_gate.weight"))?.values)
+                .map_err(|error| error.to_string())?,
+            ple_layer_projection: paged_i32s(
+                &weights.get(&at("per_layer_projection.weight"))?.values,
+            )
+            .map_err(|error| error.to_string())?,
             w_down: paged_i32s(&weights.get(&at("mlp.down_proj.weight"))?.values)
                 .map_err(|error| error.to_string())?,
         };
@@ -775,6 +845,7 @@ fn write_transformer_layers(
                 "project = \"prefill-range\"\n",
                 "inputs.activations = {{ from = \"{upstream}\" }}\n",
                 "inputs.donor_kv = {{ from = \"{donor}\" }}\n",
+                "inputs.ple = {{ from = \"prefill_prepare_aux_l{idx}\" }}\n",
                 "{line}"
             ),
             idx = layer_idx,

@@ -18,6 +18,7 @@ fn embed_prompt_token(
     values: Bytes<196_608>,
     hidden_size: u32,
     page_size: u64,
+    embedding_scale: i32,
 ) -> RecurSequenceOutput<ActivationSequence> {
     let token_id = call!(begin_row_lookup, input);
     let byte_off = call!(embedding_byte_offset, token_id.clone(), hidden_size.clone());
@@ -29,7 +30,8 @@ fn embed_prompt_token(
         token_id,
         page,
         byte_off,
-        hidden_size
+        hidden_size,
+        embedding_scale
     )
 }
 
@@ -42,13 +44,14 @@ fn main(prompt: PromptTokenization, embedding: EmbeddingTable) -> Result<Activat
     let token_ids = select!(List<u32>, prompt.token_ids);
     let hidden_size = select!(u32, embedding.clone().hidden_size);
     let page_size = select!(u64, embedding.clone().values.page_size);
+    let embedding_scale = select!(i32, embedding.clone().embedding_scale);
     let values = select!(Bytes<196_608>, embedding.values);
 
     let embedded = call_recur_seq!(
         sequence = embed_prompt_token,
         input = token_ids,
         output = new!(ActivationSequence),
-        args = (values, hidden_size, page_size)
+        args = (values, hidden_size, page_size, embedding_scale)
     );
     raster::println!("embedding pass → {:?}", embedded);
 

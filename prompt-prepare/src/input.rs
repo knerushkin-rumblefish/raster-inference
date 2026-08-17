@@ -161,6 +161,23 @@ pub struct MergeCursor {
     pub has_pending: bool,
 }
 
+/// One step of the fixed-point check: the pair under inspection, plus the
+/// running count carried past it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+pub struct ScanStep {
+    pub step: MergeStep,
+    pub remaining: u32,
+}
+
+/// Loop-carried state of the fixed-point check: the previous piece, and how
+/// many adjacent pairs would still merge.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+pub struct MergeScan {
+    pub previous: String,
+    pub has_previous: bool,
+    pub remaining: u32,
+}
+
 /// One merge decision in flight: the cursor's pending token paired with the
 /// incoming piece. This is the small scalar item the merge-table scan reads
 /// on every iteration.

@@ -9,6 +9,8 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use raster::{Bytes, BytesPage, List};
+use det_num::ops::{div_act, gelu_pytorch_tanh_act, mac_bits, mul_sat, requantize, rms_norm_in_place, value_rms_norm_in_place};
+use det_num::{Acc, Act, Wgt};
 use serde::{Deserialize, Serialize};
 
 /// Fractional bits in the Q16.16 representation.
@@ -42,6 +44,30 @@ pub struct ActivationSequence {
     /// except layers 13 and 14 — and ignored by every consumer that is not a
     /// sharing layer.
     pub kv: List<KeyRow>,
+}
+
+/// One token's per-layer embedding.
+///
+/// A wrapper rather than a bare `BytesPage` on purpose: `select!(BytesPage, xs[i])`
+/// treats its target as a *paged region* and rewrites the path to `xs.pages[i]`,
+/// which is wrong for a `List<BytesPage>`. Naming a struct keeps the index
+/// meaning what it says.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+pub struct PleRow {
+    pub values: BytesPage,
+}
+
+/// One layer's per-layer embeddings, one row per prompt token.
+///
+/// MUST match `PleLayerInputs` in `prefill-prepare-aux` — the chain binds
+/// `prefill_range_lN` to `prefill_prepare_aux_lN` by structural commitment.
+/// `rows` is in prompt order, so a token's row is a dynamic index on its
+/// position.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+pub struct PleLayerInputs {
+    pub layer_idx: u32,
+    pub rows: List<PleRow>,
+    pub errors: List<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -89,6 +115,11 @@ pub struct LayerParams {
     pub norm_post_ffw: BytesPage,
     pub q_norm: BytesPage,
     pub k_norm: BytesPage,
+    /// Width of this layer's per-layer-embedding vector (`hidden_size_per_layer_input`).
+    pub ple_width: u32,
+    /// Post-projection norm for the PLE block. **Hidden-width, not `ple_width`** —
+    /// it normalises after `per_layer_projection` has mapped back up to hidden.
+    pub ple_post_norm: BytesPage,
 }
 
 /// One transformer layer's committed external.
@@ -109,6 +140,12 @@ pub struct TransformerLayer {
     pub w_up: Bytes<196_608>,
     #[page_size = 196_608]
     pub w_down: Bytes<196_608>,
+    /// PLE gate: hidden -> ple_width.
+    #[page_size = 196_608]
+    pub ple_input_gate: Bytes<196_608>,
+    /// PLE projection back up: ple_width -> hidden.
+    #[page_size = 196_608]
+    pub ple_layer_projection: Bytes<196_608>,
 }
 
 /// Key/value side of one token, for the attention scan.
@@ -153,6 +190,58 @@ pub struct ProjAccum {
     pub error: String,
 }
 
+/// Per-query attention scores, key-major (`scores[key * num_heads + head]`).
+///
+/// Key-major so a pass can append one key's scores for every head with a single
+/// extend; the softmax reads each head with a stride. Only *visible* keys are
+/// appended, matching the reference, which softmaxes over the window rather than
+/// masking a full-length row.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+pub struct ScoreAccum {
+    pub scores: BytesPage,
+    pub count: u32,
+    pub error: String,
+}
+
+/// Softmax weights, same layout and count as the scores they came from.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+pub struct WeightVec {
+    pub weights: BytesPage,
+    pub count: u32,
+    pub error: String,
+}
+
+/// Weighted-sum accumulator: one `i64` per (head, lane).
+///
+/// `i64` because the reference accumulates the whole weighted sum in `Acc`
+/// precision and requantizes exactly once at the end; accumulating in `Act`
+/// would round on every key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+pub struct CtxAccum {
+    pub acc: BytesPage,
+    pub error: String,
+}
+
+/// Packs `i64` accumulators little-endian.
+pub fn pack_i64s(values: &[i64]) -> BytesPage {
+    let mut bytes = Vec::with_capacity(values.len() * 8);
+    for value in values {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    BytesPage::__from_parts(0, 0, bytes)
+}
+
+pub fn unpack_i64s(page: &BytesPage) -> core::result::Result<Vec<i64>, String> {
+    let bytes = page.as_slice();
+    if bytes.len() % 8 != 0 {
+        return Err(alloc::format!("page length {} is not i64-aligned", bytes.len()));
+    }
+    Ok(bytes
+        .chunks_exact(8)
+        .map(|c| i64::from_le_bytes(c.try_into().expect("chunks_exact(8)")))
+        .collect())
+}
+
 /// Streaming softmax state — one running max, sum and weighted accumulator
 /// per head.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
@@ -169,6 +258,26 @@ pub struct AttnState {
 pub struct PackedVec {
     pub values: BytesPage,
     pub error: String,
+}
+
+/// Weightless RMS norm, applied per head to V.
+///
+/// Gemma 3n normalises values as well as queries and keys — `q_norm`/`k_norm`
+/// carry learned weights, this one does not. Omitting it is invisible: the
+/// attention still produces a plausible context, just not the model's.
+pub fn value_rms_norm(row: &mut [i32], eps: i64) -> core::result::Result<(), String> {
+    if row.is_empty() {
+        return Err(String::from("value rms norm requires at least one value"));
+    }
+    if eps < 0 {
+        return Err(String::from("value rms norm epsilon must be non-negative"));
+    }
+    let mut lanes: alloc::vec::Vec<Act> = row.iter().map(|b| Act::from_bits(*b)).collect();
+    value_rms_norm_in_place(&mut lanes, Acc::from_bits(eps));
+    for (slot, value) in row.iter_mut().zip(lanes.iter()) {
+        *slot = value.to_bits();
+    }
+    Ok(())
 }
 
 /// Loop-carried summary of failed rows.
@@ -219,32 +328,25 @@ fn clamp_i64(value: i64) -> i32 {
 }
 
 pub fn mul(a: i32, b: i32) -> i32 {
-    clamp_i64((a as i64 * b as i64) >> FRAC_BITS)
+    // Canonical multiply: widen, then requantize ties-to-even and saturate.
+    // The previous version truncated with `>> FRAC_BITS`, which rounds toward
+    // negative infinity and differs from the reference on half the inputs.
+    mul_sat(Act::from_bits(a), Act::from_bits(b)).to_bits()
 }
 
 pub fn div(a: i32, b: i32) -> i32 {
     if b == 0 {
         return 0;
     }
-    clamp_i64(((a as i64) << FRAC_BITS) / b as i64)
+    // Canonical divide: ties-to-even, not the truncating shift-and-divide this
+    // replaces.
+    div_act(Act::from_bits(a), Act::from_bits(b)).to_bits()
 }
 
 pub fn add_sat(a: i32, b: i32) -> i32 {
     a.saturating_add(b)
 }
 
-pub fn isqrt(value: i64) -> i64 {
-    if value <= 0 {
-        return 0;
-    }
-    let mut guess = value;
-    let mut next = (guess + 1) / 2;
-    while next < guess {
-        guess = next;
-        next = (guess + value / guess) / 2;
-    }
-    guess
-}
 
 pub fn exp(x: i32) -> i32 {
     const LOG2E: i32 = 94548;
@@ -277,10 +379,10 @@ pub fn exp(x: i32) -> i32 {
 }
 
 pub fn gelu(x: i32) -> i32 {
-    const GELU_COEFF: i32 = 111542;
-    let z = mul(x, GELU_COEFF);
-    let sigmoid = div(ONE, ONE.saturating_add(exp(-z)));
-    mul(x, sigmoid)
+    // The model declares `hidden_activation: "gelu_pytorch_tanh"`. What this
+    // replaced was a *sigmoid* approximation — a different function, not a
+    // different rounding — feeding every MLP and the PLE gate.
+    gelu_pytorch_tanh_act(Act::from_bits(x)).to_bits()
 }
 
 pub fn scale_row(row: &mut [i32], scalar: i32) {
@@ -311,11 +413,15 @@ pub fn dot(a: &[i32], b: &[i32]) -> core::result::Result<i32, String> {
             b.len()
         ));
     }
+    // Accumulate the *full* Q32.32 products and requantize once, which is the
+    // canonical MAC contract. The previous version shifted each product down to
+    // Q16.16 before adding, truncating on every term and rounding differently at
+    // the end — invisible per element, decisive over a 1536-wide row.
     let mut acc: i64 = 0;
     for (left, right) in a.iter().zip(b) {
-        acc += (*left as i64 * *right as i64) >> FRAC_BITS;
+        acc = mac_bits(acc, *left, *right);
     }
-    Ok(clamp_i64(acc))
+    Ok(requantize(Acc::from_bits(acc)).to_bits())
 }
 
 pub fn rms_norm(row: &mut [i32], weights: &[i32], eps: i64) -> core::result::Result<(), String> {
@@ -329,20 +435,23 @@ pub fn rms_norm(row: &mut [i32], weights: &[i32], eps: i64) -> core::result::Res
     if row.is_empty() {
         return Err(String::from("rms norm requires at least one value"));
     }
-
-    let mut sum_squares: i64 = 0;
-    for value in row.iter() {
-        sum_squares += (*value as i64 * *value as i64) >> FRAC_BITS;
-    }
-    let mean_square = sum_squares / row.len() as i64 + eps;
-    let rms = isqrt(mean_square << FRAC_BITS);
-    if rms == 0 {
-        return Ok(());
+    if eps < 0 {
+        return Err(String::from("rms norm epsilon must be non-negative"));
     }
 
-    for (value, weight) in row.iter_mut().zip(weights) {
-        let weighted = (*value as i64 * *weight as i64) >> FRAC_BITS;
-        *value = clamp_i64((weighted << FRAC_BITS) / rms);
+    // Delegates to the canonical kernel rather than reimplementing it. The
+    // hand-rolled version this replaces differed from the reference in four
+    // ways at once — Q16.16 instead of Q32.32 accumulation, truncating instead
+    // of ties-to-even division, dividing by the RMS instead of multiplying by
+    // its reciprocal, and applying the weight before the scale rather than
+    // after. None of that is visible in the output; it just produces a
+    // different activation. `eps` is `Acc` (Q32.32) bits, which is also what
+    // the old encoding got wrong: 1e-6 in Q16.16 rounds to zero.
+    let mut lanes: alloc::vec::Vec<Act> = row.iter().map(|b| Act::from_bits(*b)).collect();
+    let weight: alloc::vec::Vec<Wgt> = weights.iter().map(|b| Wgt::from_bits(*b)).collect();
+    rms_norm_in_place(&mut lanes, &weight, Acc::from_bits(eps));
+    for (slot, value) in row.iter_mut().zip(lanes.iter()) {
+        *slot = value.to_bits();
     }
     Ok(())
 }

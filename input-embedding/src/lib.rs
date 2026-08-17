@@ -11,6 +11,8 @@
 extern crate alloc;
 
 use alloc::string::String;
+use det_num::ops::mul_sat;
+use det_num::Act;
 use raster::prelude::*;
 
 pub mod input;
@@ -48,13 +50,25 @@ pub fn append_activation_row(
     page: BytesPage,
     byte_off: u64,
     hidden_size: u32,
+    embedding_scale: i32,
 ) -> Draft<ActivationSequence> {
     let mut output = output;
     match unpack_i32s_at(&page, byte_off, hidden_size) {
-        Ok(values) => output.rows().push(ActivationRow {
-            token_id,
-            values: pack_i32s(&values),
-        }),
+        // Gemma scales the embedding by sqrt(hidden) before layer 0. Applied
+        // here, with the canonical multiply, because the row is only ever read
+        // once — and because an unscaled activation is not detectably wrong
+        // downstream, it just quietly produces a different token.
+        Ok(values) => {
+            let scale = Act::from_bits(embedding_scale);
+            let scaled: alloc::vec::Vec<i32> = values
+                .iter()
+                .map(|bits| mul_sat(Act::from_bits(*bits), scale).to_bits())
+                .collect();
+            output.rows().push(ActivationRow {
+                token_id,
+                values: pack_i32s(&scaled),
+            })
+        }
         Err(_) => output.errors().push(alloc::format!(
             "token {token_id} has no embedding row of the declared width"
         )),

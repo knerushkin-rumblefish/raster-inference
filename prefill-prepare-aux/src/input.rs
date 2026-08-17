@@ -9,6 +9,8 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use raster::{Bytes, BytesPage, List};
+use det_num::ops::{mac_bits, mul_sat, requantize, rms_norm_in_place};
+use det_num::{Acc, Act, Wgt};
 use serde::{Deserialize, Serialize};
 
 /// Fractional bits in the Q16.16 representation.
@@ -109,11 +111,22 @@ pub struct KeyRow {
     pub v: BytesPage,
 }
 
+/// One token's per-layer embedding.
+///
+/// A wrapper rather than a bare `BytesPage` on purpose: `select!(BytesPage, xs[i])`
+/// treats its target as a *paged region* and rewrites the path to `xs.pages[i]`,
+/// which is wrong for a `List<BytesPage>`. Naming a struct keeps the index
+/// meaning what it says.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+pub struct PleRow {
+    pub values: BytesPage,
+}
+
 /// The stage's authorized output.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
 pub struct PleLayerInputs {
     pub layer_idx: u32,
-    pub rows: List<BytesPage>,
+    pub rows: List<PleRow>,
     pub errors: List<String>,
 }
 
@@ -179,7 +192,10 @@ fn clamp_i64(value: i64) -> i32 {
 }
 
 pub fn mul(a: i32, b: i32) -> i32 {
-    clamp_i64((a as i64 * b as i64) >> FRAC_BITS)
+    // Canonical multiply: widen, then requantize ties-to-even and saturate.
+    // The previous version truncated with `>> FRAC_BITS`, which rounds toward
+    // negative infinity and differs from the reference on half the inputs.
+    mul_sat(Act::from_bits(a), Act::from_bits(b)).to_bits()
 }
 
 pub fn add_sat(a: i32, b: i32) -> i32 {
@@ -192,18 +208,6 @@ pub fn scale_row(row: &mut [i32], scalar: i32) {
     }
 }
 
-pub fn isqrt(value: i64) -> i64 {
-    if value <= 0 {
-        return 0;
-    }
-    let mut guess = value;
-    let mut next = (guess + 1) / 2;
-    while next < guess {
-        guess = next;
-        next = (guess + value / guess) / 2;
-    }
-    guess
-}
 
 pub fn dot(a: &[i32], b: &[i32]) -> core::result::Result<i32, String> {
     if a.len() != b.len() {
@@ -213,11 +217,15 @@ pub fn dot(a: &[i32], b: &[i32]) -> core::result::Result<i32, String> {
             b.len()
         ));
     }
+    // Accumulate the *full* Q32.32 products and requantize once, which is the
+    // canonical MAC contract. The previous version shifted each product down to
+    // Q16.16 before adding, truncating on every term and rounding differently at
+    // the end — invisible per element, decisive over a 1536-wide row.
     let mut acc: i64 = 0;
     for (left, right) in a.iter().zip(b) {
-        acc += (*left as i64 * *right as i64) >> FRAC_BITS;
+        acc = mac_bits(acc, *left, *right);
     }
-    Ok(clamp_i64(acc))
+    Ok(requantize(Acc::from_bits(acc)).to_bits())
 }
 
 pub fn rms_norm(row: &mut [i32], weights: &[i32], eps: i64) -> core::result::Result<(), String> {
@@ -231,20 +239,23 @@ pub fn rms_norm(row: &mut [i32], weights: &[i32], eps: i64) -> core::result::Res
     if row.is_empty() {
         return Err(String::from("rms norm requires at least one value"));
     }
-
-    let mut sum_squares: i64 = 0;
-    for value in row.iter() {
-        sum_squares += (*value as i64 * *value as i64) >> FRAC_BITS;
-    }
-    let mean_square = sum_squares / row.len() as i64 + eps;
-    let rms = isqrt(mean_square << FRAC_BITS);
-    if rms == 0 {
-        return Ok(());
+    if eps < 0 {
+        return Err(String::from("rms norm epsilon must be non-negative"));
     }
 
-    for (value, weight) in row.iter_mut().zip(weights) {
-        let weighted = (*value as i64 * *weight as i64) >> FRAC_BITS;
-        *value = clamp_i64((weighted << FRAC_BITS) / rms);
+    // Delegates to the canonical kernel rather than reimplementing it. The
+    // hand-rolled version this replaces differed from the reference in four
+    // ways at once — Q16.16 instead of Q32.32 accumulation, truncating instead
+    // of ties-to-even division, dividing by the RMS instead of multiplying by
+    // its reciprocal, and applying the weight before the scale rather than
+    // after. None of that is visible in the output; it just produces a
+    // different activation. `eps` is `Acc` (Q32.32) bits, which is also what
+    // the old encoding got wrong: 1e-6 in Q16.16 rounds to zero.
+    let mut lanes: alloc::vec::Vec<Act> = row.iter().map(|b| Act::from_bits(*b)).collect();
+    let weight: alloc::vec::Vec<Wgt> = weights.iter().map(|b| Wgt::from_bits(*b)).collect();
+    rms_norm_in_place(&mut lanes, &weight, Acc::from_bits(eps));
+    for (slot, value) in row.iter_mut().zip(lanes.iter()) {
+        *slot = value.to_bits();
     }
     Ok(())
 }

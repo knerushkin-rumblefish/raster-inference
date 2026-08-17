@@ -127,3 +127,102 @@ fn partial_rotary_leaves_the_tail_untouched() {
         );
     }
 }
+
+#[test]
+fn rms_norm_matches_upstream() {
+    // `rms_norm` is the most-used kernel in a layer — input norm, post-attention,
+    // pre/post feed-forward, q/k norm, and the PLE post-projection norm all route
+    // through it. A hand-rolled version diverged from the reference in four ways
+    // at once (accumulator width, rounding, reciprocal-vs-divide, and operand
+    // order), which is what this test exists to prevent recurring.
+    for width in [4usize, 16, 256, 1536] {
+        for eps_f in [0.0f32, 1e-6, 1e-5] {
+            let vals = sample_bits(0x5EED ^ width as u64, width);
+            let wts = sample_bits(0xB1CE ^ width as u64, width);
+            let up_eps = upstream::f32_to_acc(eps_f);
+
+            let up_in: Vec<upstream::Act> =
+                vals.iter().map(|b| upstream::Act::from_bits(*b)).collect();
+            let up_w: Vec<upstream::Wgt> =
+                wts.iter().map(|b| upstream::Wgt::from_bits(*b)).collect();
+            let up_out = upstream::rms_norm(&up_in, &up_w, up_eps);
+
+            let v_in: Vec<VAct> = vals.iter().map(|b| VAct::from_bits(*b)).collect();
+            let v_w: Vec<det_num::types::Wgt> = wts
+                .iter()
+                .map(|b| det_num::types::Wgt::from_bits(*b))
+                .collect();
+            let v_out = vendored::rms_norm(&v_in, &v_w, VAcc::from_bits(up_eps.to_bits()));
+
+            for (i, (u, v)) in up_out.iter().zip(v_out.iter()).enumerate() {
+                assert_eq!(
+                    u.to_bits(),
+                    v.to_bits(),
+                    "width {width} eps {eps_f}: lane {i} differs"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn value_rms_norm_matches_upstream() {
+    // The weightless twin, applied per head to V. It was missing from the chain
+    // entirely, which is the kind of omission no shape check catches.
+    for width in [4usize, 64, 256, 512] {
+        for eps_f in [0.0f32, 1e-6] {
+            let vals = sample_bits(0xFA1E ^ width as u64, width);
+            let up_eps = upstream::f32_to_acc(eps_f);
+            let up_in: Vec<upstream::Act> =
+                vals.iter().map(|b| upstream::Act::from_bits(*b)).collect();
+            let up_out = upstream::value_rms_norm(&up_in, up_eps);
+            let v_in: Vec<VAct> = vals.iter().map(|b| VAct::from_bits(*b)).collect();
+            let v_out = vendored::value_rms_norm(&v_in, VAcc::from_bits(up_eps.to_bits()));
+            for (i, (u, v)) in up_out.iter().zip(v_out.iter()).enumerate() {
+                assert_eq!(u.to_bits(), v.to_bits(), "width {width} eps {eps_f}: lane {i}");
+            }
+        }
+    }
+}
+
+/// Scalar kernels delegated in the stages: each was hand-rolled and each was
+/// wrong in a way no shape or range check would surface.
+#[test]
+fn scalar_kernels_match_upstream() {
+    let samples = sample_bits(0xC0FFEE, 512);
+    for (i, a) in samples.iter().enumerate() {
+        let b = samples[(i + 7) % samples.len()];
+
+        // mul: was a truncating `>> 16`; canonical requantizes ties-to-even.
+        assert_eq!(
+            upstream::mul_sat(upstream::Act::from_bits(*a), upstream::Act::from_bits(b)).to_bits(),
+            vendored::mul_sat(VAct::from_bits(*a), VAct::from_bits(b)).to_bits(),
+            "mul_sat at {i}"
+        );
+
+        // gelu: the model declares gelu_pytorch_tanh; ours was a sigmoid approximation.
+        assert_eq!(
+            upstream::gelu_pytorch_tanh_act(upstream::Act::from_bits(*a)).to_bits(),
+            vendored::gelu_pytorch_tanh_act(VAct::from_bits(*a)).to_bits(),
+            "gelu at {i}"
+        );
+
+        if b != 0 {
+            assert_eq!(
+                upstream::div_act(upstream::Act::from_bits(*a), upstream::Act::from_bits(b))
+                    .to_bits(),
+                vendored::div_act(VAct::from_bits(*a), VAct::from_bits(b)).to_bits(),
+                "div_act at {i}"
+            );
+        }
+
+        // softcap requires a strictly positive cap.
+        let cap = 30 << 16;
+        assert_eq!(
+            upstream::softcap_act(upstream::Act::from_bits(*a), upstream::Act::from_bits(cap))
+                .to_bits(),
+            vendored::softcap_act(VAct::from_bits(*a), VAct::from_bits(cap)).to_bits(),
+            "softcap at {i}"
+        );
+    }
+}

@@ -30,6 +30,10 @@ pub struct PromptTokenization {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
 pub struct EmbeddingTable {
     pub hidden_size: u32,
+    /// Gemma multiplies every token embedding by `sqrt(hidden_size)` before the
+    /// first layer. Committed as Q16.16 bits so the tile applies exactly the
+    /// scalar the importer derived, with no float anywhere near a replay.
+    pub embedding_scale: i32,
     #[page_size = 196_608]
     pub values: Bytes<196_608>,
 }

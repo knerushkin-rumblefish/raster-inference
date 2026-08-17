@@ -89,10 +89,33 @@ pub fn emit_merged_piece(
     output: Draft<MergedPieces>,
     step: MergeStep,
     hit: MergeMatch,
+    terminator: String,
 ) -> Draft<MergedPieces> {
     let mut output = output;
     if step.has_pending && !hit.matched {
         output.pieces().push(step.pending);
+    }
+    // The pass flushes a completed token only when the *next* piece fails to
+    // extend it, so whatever is pending after the last piece is never emitted.
+    // That is exactly how the terminator gets consumed — and it is why the
+    // terminator has to be re-emitted here: without it, round 2 has no
+    // sentinel and silently drops its own last token instead.
+    if step.piece == terminator {
+        output.pieces().push(step.piece);
+    }
+    output
+}
+
+/// Drops the terminator once the rounds have converged.
+#[tile(kind = iter, description = "Append a merged piece unless it is the terminator")]
+pub fn append_unless_terminator(
+    output: Draft<MergedPieces>,
+    piece: String,
+    terminator: String,
+) -> Draft<MergedPieces> {
+    let mut output = output;
+    if piece != terminator {
+        output.pieces().push(piece);
     }
     output
 }
@@ -165,4 +188,57 @@ pub fn append_token_id(
     let mut output = output;
     output.token_ids().push(hit.token_id);
     output
+}
+
+// ---------------------------------------------------------------------------
+// Fixed-point check — is another merge pass still needed?
+// ---------------------------------------------------------------------------
+
+/// Pairs the previous piece with the incoming one, carrying the running count.
+///
+/// The count has to ride along: this tile consumes the loop state to build the
+/// pair, so nothing later in the iteration could recover it otherwise.
+#[tile(kind = iter, description = "Pair the previous piece with the next, for the fixed-point check")]
+pub fn begin_scan_step(scan: MergeScan, piece: String) -> ScanStep {
+    ScanStep {
+        step: MergeStep {
+            pending: scan.previous,
+            has_pending: scan.has_previous,
+            piece,
+        },
+        remaining: scan.remaining,
+    }
+}
+
+/// Bucket index for the pair under inspection.
+#[tile(kind = iter, description = "Bucket index for the fixed-point check")]
+pub fn scan_bucket_index(step: MergeStep, bucket_count: u32) -> u32 {
+    merge_bucket_of(&step.pending, &step.piece, bucket_count)
+}
+
+/// Counts a still-mergeable pair and slides the window forward.
+#[tile(kind = iter, description = "Count a pair that a further pass would merge")]
+pub fn advance_scan(scan_step: ScanStep, hit: MergeMatch) -> MergeScan {
+    MergeScan {
+        previous: scan_step.step.piece,
+        has_previous: true,
+        // Saturating: a prompt that somehow overflowed would still report
+        // "not converged" rather than wrapping to zero and reading as done.
+        remaining: scan_step
+            .remaining
+            .saturating_add(if hit.matched { 1 } else { 0 }),
+    }
+}
+
+/// Rejects a tokenization that has not reached its fixed point.
+#[tile(kind = iter, description = "Reject a tokenization that is still mergeable")]
+pub fn assert_merges_converged(remaining: u32) -> Result<u32> {
+    if remaining == 0 {
+        Ok(remaining)
+    } else {
+        Err(alloc::format!(
+            "{remaining} adjacent pair(s) would still merge after the last round; \
+             the merge unroll in `main` is too short for this prompt"
+        ))
+    }
 }
