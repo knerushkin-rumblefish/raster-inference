@@ -1,8 +1,10 @@
-//! Phase 2 — `input-embedding`: tiles.
+//! Phase 7 — `decode-embed`: tiles.
 //!
-//! Gathers one embedding row per prompt token id. The table is a paged byte
-//! region, addressed by `token_id * hidden_size * 4`; an out-of-range id
-//! aborts (a list has no non-membership proof).
+//! Gathers the embedding row for **one** generated token. Same table, same
+//! addressing and the same canonical scale as `input-embedding` — the only
+//! difference is that there is one token rather than a prompt, so the sequence
+//! is straight-line instead of a recur, and the sequence starts partway in
+//! rather than at zero.
 //!
 //! `#![no_std]` so the same tiles compile into RISC0 replay guests.
 
@@ -18,12 +20,6 @@ use raster::prelude::*;
 pub mod input;
 
 use input::*;
-
-/// Materializes one prompt token id so later steps can each read it.
-#[tile(kind = iter, description = "Turn a prompt token id into a reusable binding")]
-pub fn begin_row_lookup(token_id: u32) -> u32 {
-    token_id
-}
 
 /// `token_id * hidden_size * 4` — the byte offset of that row in the table.
 #[tile(kind = iter, description = "Byte offset of an embedding row")]
@@ -41,17 +37,22 @@ pub fn page_of(byte_offset: u64, page_size: u64) -> u64 {
     }
 }
 
-/// Stamps the prompt's starting position onto the activation sequence.
+/// Stamps this decode step's absolute position onto the activation sequence.
 ///
-/// Always zero: this stage embeds the prompt, which by definition starts the
-/// sequence. It is written rather than assumed because every consumer of an
-/// `ActivationSequence` reads `start_position` to place its tokens, and a
-/// decode step's embed stage sets a different value from the same field.
-/// Set-once, so it happens here rather than inside the per-token append.
-#[tile(kind = iter, description = "Open the prompt's activation sequence at position zero")]
-pub fn begin_prompt_activations(output: Draft<ActivationSequence>) -> Draft<ActivationSequence> {
+/// The mirror of `input-embedding`'s `begin_prompt_activations`, which sets
+/// zero. Here it is `selected.decode_position`, which `prefill-finalize`
+/// already computed as `start_position + token_count` — the position after
+/// everything scored so far, which is exactly where the token it selected
+/// belongs. Every layer downstream reads this to place its token for RoPE and
+/// for window visibility, so getting it wrong is a wrong answer rather than an
+/// error.
+#[tile(kind = iter, description = "Open the decode step's activation sequence at its position")]
+pub fn begin_decode_activations(
+    output: Draft<ActivationSequence>,
+    decode_position: u32,
+) -> Draft<ActivationSequence> {
     let mut output = output;
-    output.start_position().set(0);
+    output.start_position().set(decode_position);
     output
 }
 

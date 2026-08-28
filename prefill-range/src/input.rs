@@ -39,11 +39,24 @@ pub struct ActivationRow {
 pub struct ActivationSequence {
     pub rows: List<ActivationRow>,
     pub errors: List<String>,
-    /// This layer's own K/V cache, carried so a later sharing layer can attend
-    /// over it. Empty on stages that donate to nobody — which is every stage
-    /// except layers 13 and 14 — and ignored by every consumer that is not a
-    /// sharing layer.
+    /// This layer's K/V cache after this stage: everything it was handed as
+    /// `prior_kv`, pruned to the sliding window, plus one row per token this
+    /// stage processed.
+    ///
+    /// Every layer publishes it, and it is read by two different consumers: a
+    /// later *sharing* layer attends over its donor's cache in the same step,
+    /// and the *same* layer one decode step later takes it as `prior_kv`. A
+    /// layer that is neither a donor nor decoded again still pays to publish
+    /// it, which is the price of one uniform program across all 35 stages.
     pub kv: List<KeyRow>,
+    /// Absolute position of `rows[0]` in the full sequence — 0 for the prompt,
+    /// `prompt_len + t` for decode step `t`.
+    ///
+    /// Positions cannot be recovered by counting: a decode stage sees one row
+    /// but sits at position `prompt_len + t`, and RoPE and sliding-window
+    /// visibility are both defined over the absolute value. Carrying it
+    /// explicitly is what lets one program serve prefill and decode.
+    pub start_position: u32,
 }
 
 /// One token's per-layer embedding.
@@ -159,10 +172,31 @@ pub struct KeyRow {
 /// Query side of one token, plus the residual it will be added back to.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
 pub struct QueryRow {
+    /// Absolute position in the full sequence — RoPE and window visibility.
     pub position: u32,
+    /// Index of this token *within this stage*: `position - start_position`.
+    ///
+    /// Not the same number as `position` once a stage starts partway through
+    /// the sequence, and the distinction is load-bearing. `ple.rows` and pass
+    /// 1's `keys` are both built by this stage and hold one entry per token it
+    /// processed, so they are indexed by `local`. Indexing them by `position`
+    /// works only while a stage starts at zero, and an out-of-range dynamic
+    /// index aborts the run with no output rather than committing an error.
+    pub local: u32,
     pub token_id: u32,
     pub q: BytesPage,
     pub residual: BytesPage,
+}
+
+/// Pass 1's loop-carried position pair.
+///
+/// Scalar-small, which is what recur `state` requires: it is re-committed on
+/// every iteration. Both fields advance in lockstep; they differ by the
+/// stage's `start_position`, and carrying both beats recomputing either.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+pub struct TokenCursor {
+    pub position: u32,
+    pub local: u32,
 }
 
 /// Pass 1's result: keys and queries as separate lists so the key scan does
@@ -198,8 +232,26 @@ pub struct ProjAccum {
 /// masking a full-length row.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
 pub struct ScoreAccum {
+    /// Dense `window_len × num_heads` scores, addressed by the key's position
+    /// rather than by the order the sweep reached it.
+    ///
+    /// Positional because arrival order is no longer trustworthy: the sweeps
+    /// visit three separate key lists, and a decode stage's inherited cache is
+    /// pruned to the sliding window. Addressing by `key.position -
+    /// window_start` also makes the carrier a *fixed* size — the previous
+    /// append-shaped version grew by `num_heads` per visible key, so the
+    /// `2 · N · |T|` a recur `state` pays over `N` iterations grew with it
+    /// (`docs/issues/append-shaped-accumulators.md` §4).
     pub scores: BytesPage,
-    pub count: u32,
+    /// How many slots have been written. Equal to `window_len` exactly when the
+    /// window is complete; anything less means a key the window needs was
+    /// missing, which is a committed error rather than a silent mis-attention.
+    pub filled: u32,
+    /// Number of visible positions for this query: `min(position + 1,
+    /// sliding_window)`, or `position + 1` on a full-attention layer. Known
+    /// before any key is seen, which is what makes the dense array allocatable
+    /// up front.
+    pub window_len: u32,
     pub error: String,
 }
 

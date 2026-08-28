@@ -101,11 +101,6 @@ pub fn validate_layer_params(params: LayerParams) -> Result<LayerParams> {
     Ok(params)
 }
 
-#[tile(kind = iter, description = "Layer hidden size")]
-pub fn hidden_of(params: LayerParams) -> u32 {
-    params.hidden_size
-}
-
 #[tile(kind = iter, description = "Query projection width")]
 pub fn q_out_len(params: LayerParams) -> u32 {
     params.num_heads * params.head_dim
@@ -114,11 +109,6 @@ pub fn q_out_len(params: LayerParams) -> u32 {
 #[tile(kind = iter, description = "Key/value projection width")]
 pub fn kv_out_len(params: LayerParams) -> u32 {
     params.num_kv_heads * params.head_dim
-}
-
-#[tile(kind = iter, description = "FFN width")]
-pub fn ffn_of(params: LayerParams) -> u32 {
-    params.ffn_size
 }
 
 #[tile(kind = iter, description = "Reject a weight region of the wrong byte length")]
@@ -133,14 +123,83 @@ pub fn assert_matrix_bytes(byte_len: u64, out_len: u32, in_width: u32) -> Result
     }
 }
 
-#[tile(kind = iter, description = "Start the position counter at zero")]
-pub fn zero_u32() -> u32 {
-    0
+/// Opens pass 1's cursor at the stage's own starting position.
+///
+/// `local` always starts at zero — it counts within this stage — while
+/// `position` starts wherever the sequence had reached. In prefill the two are
+/// the same because `start_position` is zero; in decode they differ by the
+/// whole prompt.
+#[tile(kind = iter, description = "Open the token cursor at the stage's start position")]
+pub fn begin_cursor(start_position: u32) -> TokenCursor {
+    TokenCursor {
+        position: start_position,
+        local: 0,
+    }
 }
 
-#[tile(kind = iter, description = "Advance the token position")]
-pub fn advance_position(position: u32) -> u32 {
-    position + 1
+#[tile(kind = iter, description = "Advance the token cursor")]
+pub fn advance_cursor(cursor: TokenCursor) -> TokenCursor {
+    TokenCursor {
+        position: cursor.position + 1,
+        local: cursor.local + 1,
+    }
+}
+
+/// Stamps the stage's start position onto its output before anything is
+/// appended.
+///
+/// Set-once, so it happens here rather than in the per-token tile: a draft
+/// rejects a second write to the same field, and no tile inside the loop knows
+/// whether it is the last one.
+#[tile(kind = iter, description = "Open this stage's activation output")]
+pub fn begin_layer_output(
+    output: Draft<ActivationSequence>,
+    start_position: u32,
+) -> Draft<ActivationSequence> {
+    let mut output = output;
+    output.start_position().set(start_position);
+    output
+}
+
+
+/// Copies one chunk of the inherited cache into this stage's published cache,
+/// dropping rows the sliding window has already retired.
+///
+/// This is what makes a decode step's cache survive a chain boundary: stage
+/// `t`'s output `kv` is stage `t+1`'s `prior_kv`. It runs with
+/// `finalize = false` so `attend_token` can go on appending this stage's own
+/// keys to the same draft — `rows` ends up one entry per token while `kv` ends
+/// up `prior + 1`, which is the whole reason the deferral exists
+/// (`docs/issues/two-recurs-one-draft.md`).
+///
+/// The write is an append that never reads what is already there, so it belongs
+/// in `output` and pays only its increment.
+///
+/// Pruning against `start_position` rather than against each query keeps at
+/// most `sliding_window` rows on 28 of the 35 layers, which is what stops a
+/// long generation carrying an unbounded cache. It is exact for decode (one new
+/// token) and a harmless superset for prefill, where the inherited cache is
+/// empty anyway. Safe only because scoring addresses by position rather than by
+/// arrival — see [`score_key`].
+#[tile(
+    kind = recur,
+    description = "Carry one chunk of the inherited K/V cache into this stage's output",
+    estimated_cycles = 400_000
+)]
+pub fn carry_cached_key(
+    input: RecurInput<Block<KeyRow>>,
+    output: RecurOutput<ActivationSequence>,
+    start_position: u32,
+    sliding_window: u32,
+) -> RecurOutput<ActivationSequence> {
+    let mut output = output;
+    let keep_from = window_start(start_position, sliding_window);
+    for key in input.into_value().into_vec() {
+        if key.position >= keep_from {
+            output.kv().push(key);
+        }
+    }
+    output
 }
 
 #[tile(kind = iter, description = "Zero a matvec accumulator")]
@@ -270,7 +329,7 @@ fn begin_qkv_inner(
 #[tile(kind = iter, description = "Finish Q/K/V and append key and query rows")]
 pub fn finish_qkv(
     output: Draft<KvSequence>,
-    position: u32,
+    cursor: TokenCursor,
     prep: QkvPrep,
     q: ProjAccum,
     k: ProjAccum,
@@ -278,7 +337,8 @@ pub fn finish_qkv(
     params: LayerParams,
 ) -> Draft<KvSequence> {
     let mut output = output;
-    match finish_qkv_inner(position, &prep, &q, &k, &v, &params) {
+    let position = cursor.position;
+    match finish_qkv_inner(&cursor, &prep, &q, &k, &v, &params) {
         Ok((query, key)) => {
             output.queries().push(query);
             output.keys().push(key);
@@ -320,7 +380,7 @@ fn apply_rope(head: &mut [i32], params: &LayerParams, position: u32) {
 }
 
 fn finish_qkv_inner(
-    position: u32,
+    cursor: &TokenCursor,
     prep: &QkvPrep,
     q: &ProjAccum,
     k: &ProjAccum,
@@ -339,6 +399,7 @@ fn finish_qkv_inner(
     if !v.error.is_empty() {
         return Err(v.error.clone());
     }
+    let position = cursor.position;
     let mut q = unpack_i32s(&q.values)?;
     let mut k = unpack_i32s(&k.values)?;
     let mut v = unpack_i32s(&v.values)?;
@@ -364,6 +425,7 @@ fn finish_qkv_inner(
     Ok((
         QueryRow {
             position,
+            local: cursor.local,
             token_id: prep.token_id,
             q: pack_i32s(&q),
             residual: prep.residual.clone(),
@@ -395,23 +457,33 @@ pub fn begin_attention(row: QueryRow) -> QueryRow {
 // differently at every step, so it cannot be bit-equal. Hence two passes.
 // ---------------------------------------------------------------------------
 
-#[tile(kind = iter, description = "Empty attention score accumulator")]
-pub fn zero_scores() -> ScoreAccum {
+#[tile(kind = iter, description = "Zero the dense attention score window")]
+pub fn zero_scores(query: QueryRow, params: LayerParams) -> ScoreAccum {
+    let len = window_len(query.position, params.sliding_window);
     ScoreAccum {
-        scores: pack_i32s(&[]),
-        count: 0,
+        scores: pack_i32s(&vec![0; len as usize * params.num_heads as usize]),
+        filled: 0,
+        window_len: len,
         error: String::new(),
     }
 }
 
-/// Appends one visible key's per-head scores.
+/// Appends every visible key's per-head scores, one `Block` at a time.
+///
+/// Chunked because the per-key form was the single most expensive thing in the
+/// program that was not a weight page: one replay unit per cached key, times 35
+/// layers, times every generated token. `state` also grows here — `scores`
+/// gains `num_heads` entries per visible key — so the `2 · N · |T|` re-commit
+/// this recur pays shrinks with the iteration count, not just the unit count
+/// (`docs/issues/append-shaped-accumulators.md` §4). Unpacking `q` and `scores`
+/// once per chunk instead of once per key is the same saving inside the tile.
 #[tile(
     kind = recur,
-    description = "Score one key against the query, for every head",
-    estimated_cycles = 30000
+    description = "Score one chunk of keys against the query, for every head",
+    estimated_cycles = 1_900_000
 )]
 pub fn score_key(
-    input: RecurInput<KeyRow>,
+    input: RecurInput<Block<KeyRow>>,
     state: RecurState<ScoreAccum>,
     query: QueryRow,
     params: LayerParams,
@@ -424,11 +496,8 @@ pub fn score_key(
     if (params.kv_donor_layer >= 0) != donor_pass {
         return state;
     }
-    let key = input.into_value();
-    if !visible(query.position, key.position, params.sliding_window) {
-        return state;
-    }
-    if let Err(error) = push_scores(&mut state, &query, &key, &params) {
+    let keys = input.into_value();
+    if let Err(error) = push_scores(&mut state, &query, keys.as_slice(), &params) {
         state.error = error;
     }
     state
@@ -437,7 +506,7 @@ pub fn score_key(
 fn push_scores(
     state: &mut ScoreAccum,
     query: &QueryRow,
-    key: &KeyRow,
+    keys: &[KeyRow],
     params: &LayerParams,
 ) -> core::result::Result<(), String> {
     let head_dim = params.head_dim as usize;
@@ -445,16 +514,39 @@ fn push_scores(
     let kv_heads = params.num_kv_heads as usize;
     let group = heads / kv_heads.max(1);
     let q = unpack_i32s(&query.q)?;
-    let k = unpack_i32s(&key.k)?;
     let mut scores = unpack_i32s(&state.scores)?;
-    for head in 0..heads {
-        let kv_head = head / group.max(1);
-        let q_head = &q[head * head_dim..(head + 1) * head_dim];
-        let k_head = &k[kv_head * head_dim..(kv_head + 1) * head_dim];
-        scores.push(dot(q_head, k_head)?);
+    let start = window_start(query.position, params.sliding_window);
+    let mut filled = state.filled;
+    for key in keys {
+        if !visible(query.position, key.position, params.sliding_window) {
+            continue;
+        }
+        // Address by position, not by arrival: the sweeps visit three lists and
+        // a decode stage's cache is pruned, so the order a key turns up in says
+        // nothing about where its score belongs.
+        let slot = key
+            .position
+            .checked_sub(start)
+            .ok_or_else(|| String::from("visible key precedes the attention window"))?
+            as usize;
+        if slot >= state.window_len as usize {
+            return Err(alloc::format!(
+                "key at position {} falls outside a {}-wide window",
+                key.position,
+                state.window_len
+            ));
+        }
+        let k = unpack_i32s(&key.k)?;
+        for head in 0..heads {
+            let kv_head = head / group.max(1);
+            let q_head = &q[head * head_dim..(head + 1) * head_dim];
+            let k_head = &k[kv_head * head_dim..(kv_head + 1) * head_dim];
+            scores[slot * heads + head] = dot(q_head, k_head)?;
+        }
+        filled += 1;
     }
     state.scores = pack_i32s(&scores);
-    state.count += 1;
+    state.filled = filled;
     Ok(())
 }
 
@@ -464,7 +556,7 @@ pub fn softmax_scores(state: ScoreAccum, params: LayerParams) -> WeightVec {
     match softmax_scores_inner(&state, &params) {
         Ok(values) => WeightVec {
             weights: pack_i32s(&values),
-            count: state.count,
+            count: state.window_len,
             error: String::new(),
         },
         Err(error) => WeightVec {
@@ -482,11 +574,23 @@ fn softmax_scores_inner(
     if !state.error.is_empty() {
         return Err(state.error.clone());
     }
-    if state.count == 0 {
+    if state.window_len == 0 {
         return Err(String::from("attention saw no keys at or before this token"));
     }
+    // Every position in the window must have been scored. A short count means a
+    // key the window needs never reached the sweep — a pruned-too-far decode
+    // cache, or a donor binding pointing at the wrong layer. Softmaxing over
+    // the zeros left in those slots would produce a plausible-looking
+    // distribution and the wrong token, so it fails here instead.
+    if state.filled != state.window_len {
+        return Err(alloc::format!(
+            "attention window has {} of {} positions scored",
+            state.filled,
+            state.window_len
+        ));
+    }
     let heads = params.num_heads as usize;
-    let count = state.count as usize;
+    let count = state.window_len as usize;
     let scores = unpack_i32s(&state.scores)?;
     if scores.len() != heads * count {
         return Err(alloc::format!(
@@ -518,14 +622,23 @@ pub fn zero_context(params: LayerParams) -> CtxAccum {
     }
 }
 
-/// Folds one visible key's value row into the context, weighted.
+/// Folds every visible key's value row into the context, weighted, one `Block`
+/// at a time.
+///
+/// The second sweep of the same key list, chunked for the same reason as
+/// [`score_key`]. This tile's `state` genuinely needs read-back — `*dst =
+/// mac_bits(*dst, ..)` over every head and lane — so it is the one accumulator
+/// in the program that cannot move to `RecurOutput`
+/// (`docs/issues/append-shaped-accumulators.md` §5). Chunking is the only lever
+/// it has, and it is a large one: `acc` is `num_heads · head_dim` i64s
+/// re-committed on every iteration.
 #[tile(
     kind = recur,
-    description = "Accumulate one weighted value row",
-    estimated_cycles = 30000
+    description = "Accumulate one chunk of weighted value rows",
+    estimated_cycles = 1_900_000
 )]
 pub fn accumulate_context(
-    input: RecurInput<KeyRow>,
+    input: RecurInput<Block<KeyRow>>,
     state: RecurState<CtxAccum>,
     query: QueryRow,
     weights: WeightVec,
@@ -539,12 +652,8 @@ pub fn accumulate_context(
     if (params.kv_donor_layer >= 0) != donor_pass {
         return state;
     }
-    let index = input.index() as usize;
-    let key = input.into_value();
-    if !visible(query.position, key.position, params.sliding_window) {
-        return state;
-    }
-    if let Err(error) = accumulate_weighted(&mut state, index, &key, &weights, &query, &params) {
+    let keys = input.into_value();
+    if let Err(error) = accumulate_weighted(&mut state, keys.as_slice(), &weights, &query, &params) {
         state.error = error;
     }
     state
@@ -552,8 +661,7 @@ pub fn accumulate_context(
 
 fn accumulate_weighted(
     state: &mut CtxAccum,
-    index: usize,
-    key: &KeyRow,
+    keys: &[KeyRow],
     weights: &WeightVec,
     query: &QueryRow,
     params: &LayerParams,
@@ -568,23 +676,36 @@ fn accumulate_weighted(
     // The visible window is a contiguous run ending at this query, so the
     // weight slot is the key's offset from the window start — the same
     // arithmetic the reference uses to size its window.
-    let start = window_start(query.position, params.sliding_window) as usize;
-    let slot = index
-        .checked_sub(start)
-        .ok_or_else(|| String::from("visible key precedes the attention window"))?;
-    if slot >= weights.count as usize {
-        return Err(String::from("visible key falls outside the weight list"));
-    }
+    //
+    // Taken from the key's own committed `position`, not from its index in the
+    // list. Under `chunk = N` the recur index counts chunks rather than keys,
+    // and a decode stage's cache is pruned to the sliding window, so index and
+    // position diverge on both counts. `position` is the value the window is
+    // actually defined over.
+    let start = window_start(query.position, params.sliding_window);
     let w = unpack_i32s(&weights.weights)?;
-    let v = unpack_i32s(&key.v)?;
     let mut acc = unpack_i64s(&state.acc)?;
-    for head in 0..heads {
-        let kv_head = head / group.max(1);
-        let weight = w[slot * heads + head];
-        let v_head = &v[kv_head * head_dim..(kv_head + 1) * head_dim];
-        for (lane, value) in v_head.iter().enumerate() {
-            let dst = &mut acc[head * head_dim + lane];
-            *dst = mac_bits(*dst, weight, *value);
+    for key in keys {
+        if !visible(query.position, key.position, params.sliding_window) {
+            continue;
+        }
+        let slot = key
+            .position
+            .checked_sub(start)
+            .ok_or_else(|| String::from("visible key precedes the attention window"))?
+            as usize;
+        if slot >= weights.count as usize {
+            return Err(String::from("visible key falls outside the weight list"));
+        }
+        let v = unpack_i32s(&key.v)?;
+        for head in 0..heads {
+            let kv_head = head / group.max(1);
+            let weight = w[slot * heads + head];
+            let v_head = &v[kv_head * head_dim..(kv_head + 1) * head_dim];
+            for (lane, value) in v_head.iter().enumerate() {
+                let dst = &mut acc[head * head_dim + lane];
+                *dst = mac_bits(*dst, weight, *value);
+            }
         }
     }
     state.acc = pack_i64s(&acc);
@@ -617,6 +738,18 @@ pub fn finish_context(state: CtxAccum) -> PackedVec {
 }
 
 /// First visible key position for a query under the sliding window.
+/// How many positions are visible to a query — the width of the dense score
+/// window. Computable before any key is seen, which is what lets
+/// [`zero_scores`] allocate the array up front.
+fn window_len(query_position: u32, sliding_window: u32) -> u32 {
+    let full = query_position + 1;
+    if sliding_window == 0 {
+        full
+    } else {
+        full.min(sliding_window)
+    }
+}
+
 fn window_start(query_position: u32, sliding_window: u32) -> u32 {
     if sliding_window == 0 {
         0
@@ -946,12 +1079,6 @@ pub fn finish_mlp(
             error,
         },
     }
-}
-
-/// Width of this layer's per-layer-embedding vector.
-#[tile(kind = iter, description = "Per-layer-embedding width")]
-pub fn ple_width_of(params: LayerParams) -> u32 {
-    params.ple_width
 }
 
 /// `gelu(gate) * per_layer_input`, elementwise at `ple_width`.

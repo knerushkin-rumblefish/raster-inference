@@ -23,8 +23,8 @@ fn prepare_ple_row(
 ) -> RecurSequenceOutput<PleLayerInputs> {
     let task = call!(begin_ple_task, input);
     let token_id = select!(u32, task.clone().token_id);
-    let ple_width = call!(ple_width_of, params.clone());
-    let hidden = call!(ple_hidden, params.clone());
+    let ple_width = select!(u32, params.clone().ple_width);
+    let hidden = select!(u32, params.clone().hidden_size);
     let byte_off = call!(ple_byte_offset, token_id, ple_width.clone());
     let page_idx = call!(page_of, byte_off.clone(), page_size);
     let emb_page = select!(BytesPage, embeddings[page_idx]);
@@ -51,14 +51,14 @@ fn prepare_ple_row(
 /// Phase 3 entrypoint, for one PLE layer.
 #[sequence]
 fn main(embedded: ActivationSequence, layer: PleLayer) -> Result<PleLayerInputs> {
-    let params = select!(PleLayerParams, layer.clone().params);
-    let params = call!(validate_layer_params, params)?;
+    let declared_params = select!(PleLayerParams, layer.clone().params);
+    let params = call!(validate_layer_params, declared_params)?;
     let page_size = select!(u64, layer.clone().embeddings.page_size);
     let embeddings = select!(Bytes<196_608>, layer.clone().embeddings);
     let proj_len = select!(u64, layer.clone().projection.byte_len);
     let projection_pages = select!(List<BytesPage>, layer.projection.pages);
-    let hidden = call!(ple_hidden, params.clone());
-    let ple_width = call!(ple_width_of, params.clone());
+    let hidden = select!(u32, params.clone().hidden_size);
+    let ple_width = select!(u32, params.clone().ple_width);
     call!(assert_matrix_bytes, proj_len, ple_width, hidden)?;
 
     let tokens = select!(List<ActivationRow>, embedded.rows);

@@ -3,6 +3,7 @@
 //! ```text
 //!   rows    ──recur seq──▶ [ begin · mac Q · mac K · mac V · finish ] ──▶ KvSequence
 //!   queries ──recur seq──▶ [ attend keys · mac O · mlp matvecs     ] ──▶ ActivationSequence
+//!                            (key sweeps run `chunk = 64`)
 //!   errors  ──recur─────▶ summarise ──▶ assert none
 //! ```
 
@@ -16,18 +17,18 @@ use prefill_range::*;
 #[sequence(kind = recur)]
 fn project_token(
     input: RecurSequenceInput<ActivationRow>,
-    state: RecurSequenceState<u32>,
+    state: RecurSequenceState<TokenCursor>,
     output: RecurSequenceOutput<KvSequence>,
     params: LayerParams,
     w_q: List<BytesPage>,
     w_k: List<BytesPage>,
     w_v: List<BytesPage>,
 ) -> (
-    RecurSequenceState<u32>,
+    RecurSequenceState<TokenCursor>,
     RecurSequenceOutput<KvSequence>,
 ) {
     let prep = call!(begin_qkv, input, params.clone());
-    let hidden = call!(hidden_of, params.clone());
+    let hidden = select!(u32, params.clone().hidden_size);
     let q_len = call!(q_out_len, params.clone());
     let kv_len = call!(kv_out_len, params.clone());
     let normed = call!(qkv_normed, prep.clone());
@@ -53,7 +54,7 @@ fn project_token(
         args = (normed, hidden)
     );
     let output = call!(finish_qkv, output, state.clone(), prep, q, k, v, params);
-    let state = call!(advance_position, state);
+    let state = call!(advance_cursor, state);
     (state, output)
 }
 
@@ -63,6 +64,7 @@ fn project_token(
 fn attend_token(
     input: RecurSequenceInput<QueryRow>,
     output: RecurSequenceOutput<ActivationSequence>,
+    prior_keys: List<KeyRow>,
     keys: List<KeyRow>,
     donor_keys: List<KeyRow>,
     params: LayerParams,
@@ -77,19 +79,36 @@ fn attend_token(
     let query = call!(begin_attention, input);
     // Attention in two passes, matching the reference: score every visible key,
     // softmax once over the whole window, then accumulate the weighted values in
-    // `Acc` precision and requantize once. Each pass sweeps both key lists and
-    // exactly one contributes, since a sequence cannot branch on
-    // `kv_donor_layer`.
-    let scores = call!(zero_scores);
+    // `Acc` precision and requantize once.
+    //
+    // Each pass sweeps three key lists and exactly one *side* contributes, since
+    // a sequence cannot branch on `kv_donor_layer`: a layer that owns its cache
+    // reads `prior_keys` then `keys`, a sharing layer reads `donor_keys`.
+    //
+    // Sweep order is deliberately not load-bearing. Both `score_key` and
+    // `accumulate_context` address by `key.position - window_start`, so a key
+    // lands in the right slot whichever list it arrived on and whichever
+    // iteration saw it. That is what lets a decode stage's inherited cache be
+    // pruned to the window without the scores silently shifting.
+    let scores = call!(zero_scores, query.clone(), params.clone());
+    let scores = call_recur!(
+        tile = score_key,
+        input = prior_keys.clone(),
+        chunk = 64,
+        state = scores,
+        args = (query.clone(), params.clone(), false)
+    );
     let scores = call_recur!(
         tile = score_key,
         input = keys.clone(),
+        chunk = 64,
         state = scores,
         args = (query.clone(), params.clone(), false)
     );
     let scores = call_recur!(
         tile = score_key,
         input = donor_keys.clone(),
+        chunk = 64,
         state = scores,
         args = (query.clone(), params.clone(), true)
     );
@@ -98,20 +117,29 @@ fn attend_token(
     let context_acc = call!(zero_context, params.clone());
     let context_acc = call_recur!(
         tile = accumulate_context,
+        input = prior_keys,
+        chunk = 64,
+        state = context_acc,
+        args = (query.clone(), weights.clone(), params.clone(), false)
+    );
+    let context_acc = call_recur!(
+        tile = accumulate_context,
         input = keys.clone(),
+        chunk = 64,
         state = context_acc,
         args = (query.clone(), weights.clone(), params.clone(), false)
     );
     let context_acc = call_recur!(
         tile = accumulate_context,
         input = donor_keys,
+        chunk = 64,
         state = context_acc,
         args = (query.clone(), weights, params.clone(), true)
     );
     let context = call!(finish_context, context_acc);
     let context_values = call!(packed_values, context.clone());
     let q_len = call!(q_out_len, params.clone());
-    let hidden = call!(hidden_of, params.clone());
+    let hidden = select!(u32, params.clone().hidden_size);
     let acc_o = call!(zero_accum, hidden.clone());
     let attn_proj = call_recur!(
         tile = mac_weight_page,
@@ -128,7 +156,7 @@ fn attend_token(
     );
     let ff_in = call!(pre_ff_norm, residual.clone(), params.clone());
     let ff_in_values = call!(packed_values, ff_in.clone());
-    let ffn = call!(ffn_of, params.clone());
+    let ffn = select!(u32, params.clone().ffn_size);
     let acc_gate = call!(zero_accum, ffn.clone());
     let gate = call_recur!(
         tile = mac_weight_page,
@@ -145,8 +173,7 @@ fn attend_token(
     );
     let gated = call!(gelu_mul, gate, up);
     let gated_values = call!(packed_values, gated);
-    let hidden_out = call!(hidden_of, params.clone());
-    let acc_down = call!(zero_accum, hidden);
+    let acc_down = call!(zero_accum, hidden.clone());
     let ff = call_recur!(
         tile = mac_weight_page,
         input = w_down,
@@ -156,25 +183,25 @@ fn attend_token(
     let xs = call!(finish_mlp, residual, ff_in, ff, params.clone());
 
     // Gemma 3n's per-layer-embedding block, applied after the MLP residual and
-    // before `layer_scalar`. `prefill_prepare_aux_lN` built one row per token
-    // for this layer; `ple_rows` is in prompt order, so the row for this token
-    // is an authorized dynamic index on its position — the same alignment the
-    // key lookup below relies on.
-    let position = select!(u32, query.clone().position);
-    let ple_row = select!(PleRow, ple_rows[position]);
+    // before `layer_scalar`. The aux stage built one row per token *this stage*
+    // processed, so the row for this token is at its stage-local index — not at
+    // its absolute position, which for a decode stage runs past the end of a
+    // one-row list. An out-of-range dynamic index aborts the run with no
+    // output, so this is the difference between a wrong answer and no answer.
+    let local = select!(u32, query.clone().local);
+    let ple_row = select!(PleRow, ple_rows[local]);
     let xs_values = call!(packed_values, xs.clone());
-    let ple_width = call!(ple_width_of, params.clone());
-    let hidden_ple = call!(hidden_of, params.clone());
+    let ple_width = select!(u32, params.clone().ple_width);
     let gate_acc = call!(zero_accum, ple_width.clone());
     let gate = call_recur!(
         tile = mac_weight_page,
         input = ple_input_gate,
         state = gate_acc,
-        args = (xs_values, hidden_ple)
+        args = (xs_values, hidden.clone())
     );
     let gated = call!(ple_gate_mul, gate, ple_row);
     let gated_values = call!(packed_values, gated);
-    let proj_acc = call!(zero_accum, hidden_out);
+    let proj_acc = call!(zero_accum, hidden);
     let projected = call_recur!(
         tile = mac_weight_page,
         input = ple_layer_projection,
@@ -182,10 +209,10 @@ fn attend_token(
         args = (gated_values, ple_width)
     );
 
-    // This token's own cache entry, fetched by an authorized dynamic index:
-    // `keys` is built in prompt order by pass 1, so it is index-aligned with
-    // the query's position.
-    let own_key = select!(KeyRow, keys[position]);
+    // This token's own cache entry, fetched by an authorized dynamic index.
+    // `keys` holds one row per token pass 1 processed, in order, so it is
+    // aligned with the stage-local index for the same reason `ple_rows` is.
+    let own_key = select!(KeyRow, keys[local]);
     call!(finish_layer, output, query, xs, projected, params, own_key)
 }
 
@@ -194,16 +221,17 @@ fn attend_token(
 fn main(
     activations: ActivationSequence,
     layer: TransformerLayer,
+    prior_kv: ActivationSequence,
     donor_kv: ActivationSequence,
     ple: PleLayerInputs,
 ) -> Result<ActivationSequence> {
-    let params = select!(LayerParams, layer.clone().params);
-    let params = call!(validate_layer_params, params)?;
+    let declared_params = select!(LayerParams, layer.clone().params);
+    let params = call!(validate_layer_params, declared_params)?;
 
-    let hidden = call!(hidden_of, params.clone());
+    let hidden = select!(u32, params.clone().hidden_size);
     let q_len = call!(q_out_len, params.clone());
     let kv_len = call!(kv_out_len, params.clone());
-    let ffn = call!(ffn_of, params.clone());
+    let ffn = select!(u32, params.clone().ffn_size);
 
     let w_q_len = select!(u64, layer.clone().w_q.byte_len);
     call!(assert_matrix_bytes, w_q_len, q_len.clone(), hidden.clone())?;
@@ -228,17 +256,28 @@ fn main(
     let w_up = select!(List<BytesPage>, layer.clone().w_up.pages);
     let w_down = select!(List<BytesPage>, layer.clone().w_down.pages);
 
+    // Where this stage sits in the full sequence. Prefill starts at zero; a
+    // decode stage starts after the prompt and every token generated so far,
+    // and RoPE and window visibility are both defined over that absolute value.
+    let start_position = select!(u32, activations.clone().start_position);
+    let start_position_arg = select!(u32, activations.clone().start_position);
+    let sliding_window = select!(u32, params.clone().sliding_window);
+
     let rows = select!(List<ActivationRow>, activations.rows);
-    let pos0 = call!(zero_u32);
+    let cursor0 = call!(begin_cursor, start_position.clone());
     let kv = call_recur_seq!(
         sequence = project_token,
         input = rows,
-        state = pos0,
+        state = cursor0,
         output = new!(KvSequence),
         args = (params.clone(), w_q, w_k, w_v)
     );
     let keys = select!(List<KeyRow>, kv.clone().keys);
     let queries = select!(List<QueryRow>, kv.clone().queries);
+    // This layer's cache as it stood before this stage — empty for every
+    // prefill stage, which binds it to `input_embedding` exactly as the
+    // non-sharing layers already bind `donor_kv`.
+    let prior_keys = select!(List<KeyRow>, prior_kv.kv);
     // The donor's published cache. Bound to `input_embedding` (an empty `kv`)
     // for every layer that computes its own, so the binding is uniform across
     // all 35 stages of this one program.
@@ -248,11 +287,26 @@ fn main(
     let ple_input_gate = select!(List<BytesPage>, layer.clone().ple_input_gate.pages);
     let ple_layer_projection = select!(List<BytesPage>, layer.ple_layer_projection.pages);
 
+    // The stage's output is built by two writers: this sweep carries the
+    // inherited cache forward, then `attend_token` appends one row and one key
+    // per token. `finalize = false` is what lets them share a draft — `rows`
+    // ends up 1 entry on a decode stage while `kv` ends up `prior + 1`, and a
+    // draft that closed at the first recur could never hold both.
+    let draft = call!(begin_layer_output, new!(ActivationSequence), start_position);
+    let draft = call_recur!(
+        tile = carry_cached_key,
+        input = prior_keys.clone(),
+        chunk = 64,
+        output = draft,
+        finalize = false,
+        args = (start_position_arg, sliding_window)
+    );
     let prepared = call_recur_seq!(
         sequence = attend_token,
         input = queries,
-        output = new!(ActivationSequence),
+        output = draft,
         args = (
+            prior_keys,
             keys,
             donor_keys,
             params,

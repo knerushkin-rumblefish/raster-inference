@@ -844,6 +844,11 @@ fn write_transformer_layers(
                 "name = \"prefill_range_l{idx}\"\n",
                 "project = \"prefill-range\"\n",
                 "inputs.activations = {{ from = \"{upstream}\" }}\n",
+                // Prefill inherits an empty cache. Bound to `input_embedding`
+                // for every layer, the same stage the non-sharing layers use
+                // for `donor_kv` — a decode stage is where this points at the
+                // previous step instead.
+                "inputs.prior_kv = {{ from = \"input_embedding\" }}\n",
                 "inputs.donor_kv = {{ from = \"{donor}\" }}\n",
                 "inputs.ple = {{ from = \"prefill_prepare_aux_l{idx}\" }}\n",
                 "{line}"

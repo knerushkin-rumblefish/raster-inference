@@ -61,16 +61,6 @@ pub fn page_of(byte_offset: u64, page_size: u64) -> u64 {
     }
 }
 
-#[tile(kind = iter, description = "PLE hidden size")]
-pub fn ple_hidden(params: PleLayerParams) -> u32 {
-    params.hidden_size
-}
-
-#[tile(kind = iter, description = "PLE width")]
-pub fn ple_width_of(params: PleLayerParams) -> u32 {
-    params.ple_width
-}
-
 /// Zero-filled matvec accumulator of `out_len` i32s.
 #[tile(kind = iter, description = "Zero a matvec accumulator")]
 pub fn zero_accum(out_len: u32) -> ProjAccum {

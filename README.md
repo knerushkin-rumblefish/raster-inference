@@ -394,3 +394,46 @@ cargo raster chain audit --execution
 Any change to a tile body, a sequence, or `main`'s signature changes the
 program identity: rebuild with the risc0 backend and commit the new
 `Raster.lock` together with the source change.
+
+## Generating more than one token
+
+The chain's decode segment is generated, not hand-written. `Raster.toml.prefill-only`
+holds the 74-stage prefill chain; `tools/gen_decode_stages.py` emits one decode step
+(73 stages: embed, 35 aux, 35 range, finalize, select) against it:
+
+```sh
+cp Raster.toml.prefill-only Raster.toml
+python3 - <<'PY'
+import subprocess, pathlib
+out = [pathlib.Path("Raster.toml").read_text().rstrip() + "\n"]
+for t in range(100):                                   # <- token count
+    out.append(subprocess.run(["python3", "tools/gen_decode_stages.py",
+                               "Raster.toml.prefill-only", str(t)],
+                              capture_output=True, text=True, check=True).stdout)
+pathlib.Path("Raster.toml").write_text("".join(out))
+PY
+cargo raster chain run          # 7,374 stages for 100 tokens
+```
+
+Every external a decode stage binds is one prefill already committed to — the weights
+are a property of the model, not of the step — so the generator reads them back out of
+the prefill manifest rather than re-importing anything.
+
+**Why generated rather than a `[[chain.repeat]]` block.** Nineteen of the twenty
+KV-sharing layers take their donor by attention type (`l ≡ 4 (mod 5)` borrows layer 14,
+the rest layer 13), and a repeat template has no conditional and no modulus. See
+`docs/issues/donor-binding-not-templatable.md`. The generator reads the donor map out
+of the prefill wiring that `model-import` already resolved, rather than deriving it a
+second time.
+
+**Before you trust the output**, build the guests with the non-default backend —
+`cargo raster build` defaults to `--backend native`, which discovers the tiles and
+prints "Build complete!" while writing no image ids, after which the chain refuses to
+run with advice that does not fix it:
+
+```sh
+for d in prompt-prepare input-embedding prefill-prepare-aux prefill-range \
+         prefill-finalize decode-embed decode-select-token; do
+  (cd $d && cargo raster build --backend risc0)
+done
+```
