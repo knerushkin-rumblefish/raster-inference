@@ -90,7 +90,7 @@ commitments = [
 name = "prompt_prepare"
 project = "prompt-prepare"
 inputs.tokenizer = { external = { path = "prompt-prepare/tokenizer.rastered", index_path = "prompt-prepare/tokenizer.rindex", commitment = "aa9b15cfd910f92b91638a8af385aef31f5166466d7871652946f32575812718" } }
-inputs.initial_pieces = { external = { path = "prompt-prepare/initial_pieces.rastered", index_path = "prompt-prepare/initial_pieces.rindex", commitment = "7900ddd18ea891084c9c6396e3ea72870d46006967f6e0365f5cab0d8ca4109b" } }
+inputs.initial_pieces = { external = { path = "prompt-prepare/initial_pieces.rastered", index_path = "prompt-prepare/initial_pieces.rindex", commitment = "8c07b6cd3c364f072de7412008f080e9ea18d01061a7a59654124f86ff109a1d" } }
 
 [[chain.stage]]
 name = "input_embedding"
@@ -671,7 +671,7 @@ project = "decode-init"
 [[chain.repeat]]
 name = "decode"
 index = "t"
-count = 50
+count = 2
 
   [chain.repeat.exports.edge]
 stage = "decode_select_t{t}"
@@ -737,4 +737,4 @@ inputs.head = { external = { path = "prefill-finalize/head.rastered", index_path
 name = "output_finalize"
 project = "output-finalize"
 inputs.edge = { from = "decode.edge" }
-inputs.decoder = { external = { path = "output-finalize/decoder.rastered", index_path = "output-finalize/decoder.rindex", commitment = "01a2fa01593cab7c7c505448e3a4eca9a809c968e7d22c308c52dfc19d253b13" } }
+inputs.decoder = { external = { path = "output-finalize/decoder.rastered", index_path = "output-finalize/decoder.rindex", commitment = "773216bd0d4ee8b1493848972835a4a00693c1e0e206853c6f1e4c4f576e3360" } }

@@ -31,6 +31,18 @@ const ONE: i32 = 1 << 16;
 /// appears in no merge rule and is dropped with the final cursor.
 const END_OF_WORD: &str = "</w>";
 
+/// Gemma's turn markers, as `chat_template.jinja` emits them.
+///
+/// An instruction-tuned model was trained to answer inside its own turn, so a
+/// bare prompt is not a question to it — it is a fragment, and the continuation
+/// it produces is a turn break, not an answer. There is no Jinja engine here,
+/// so the one shape this chain needs — a single user message with the
+/// generation prompt appended — is written out directly.
+const BOS_TOKEN: &str = "<bos>";
+const TURN_OPEN: &str = "<|turn>";
+const TURN_CLOSE: &str = "<turn|>";
+const NEWLINE_TOKEN: &str = "\n";
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("model-import: {error}");
@@ -41,6 +53,10 @@ fn main() {
 struct Args {
     model_dir: PathBuf,
     prompt: String,
+    /// Commit the prompt exactly as given, with no turn markers and no `<bos>`.
+    /// Needed for a tokenizer that has no such tokens — `tiny-gemma-dev` — and
+    /// for reproducing a pre-template fixture.
+    raw_prompt: bool,
     /// Exact number of generated tokens. The decode loop is statically
     /// expanded to this many select+transition iterations.
     tokens: u32,
@@ -66,6 +82,7 @@ struct Args {
 fn parse_args() -> Result<Args, Box<dyn Error>> {
     let mut model_dir = None;
     let mut prompt = String::from("hello raster");
+    let mut raw_prompt = false;
     let mut tokens = 1u32;
     let mut manifest = None;
     let mut only_tokenizer = false;
@@ -77,6 +94,7 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
         match arg.as_str() {
             "--model" => model_dir = args.next().map(PathBuf::from),
             "--prompt" => prompt = args.next().ok_or("--prompt needs a value")?,
+            "--raw-prompt" => raw_prompt = true,
             "--tokens" => {
                 tokens = args
                     .next()
@@ -95,6 +113,7 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
     Ok(Args {
         model_dir: model_dir.ok_or("--model <bundle-dir> is required")?,
         prompt,
+        raw_prompt,
         tokens,
         manifest,
         only_tokenizer,
@@ -109,9 +128,17 @@ fn run() -> Result<(), Box<dyn Error>> {
     let tokenizer: serde_json::Value =
         serde_json::from_slice(&fs::read(args.model_dir.join("tokenizer.json"))?)?;
 
+    let eos_ids = load_eos_ids(&args.model_dir);
+
     if args.only_tokenizer {
         let mut stages = Vec::new();
-        let decoder_commitment = write_tokenizer(&tokenizer, &args.prompt, &mut stages)?;
+        let decoder_commitment = write_tokenizer(
+            &tokenizer,
+            &args.prompt,
+            args.raw_prompt,
+            &eos_ids,
+            &mut stages,
+        )?;
         println!();
         println!("# ---- replaces prompt and decoder externals in the root Raster.toml ----");
         for stage in &stages {
@@ -187,7 +214,13 @@ fn run() -> Result<(), Box<dyn Error>> {
     println!();
 
     let mut stages = Vec::new();
-    let decoder_commitment = write_tokenizer(&tokenizer, &args.prompt, &mut stages)?;
+    let decoder_commitment = write_tokenizer(
+        &tokenizer,
+        &args.prompt,
+        args.raw_prompt,
+        &eos_ids,
+        &mut stages,
+    )?;
     write_embedding(&weights, &shape, &mut stages)?;
     write_ple_layers(&weights, &shape, &mut stages)?;
     write_transformer_layers(&weights, &shape, &mut stages)?;
@@ -605,9 +638,40 @@ fn f32_to_q16(value: f64) -> i32 {
 // Stage 1 — tokenizer + prompt pieces
 // ---------------------------------------------------------------------------
 
+/// The model's `eos_token_id` set, from `config.json`.
+///
+/// Gemma declares more than one — `<eos>`, `<turn|>` and friends — so this is a
+/// set, and it is read from the bundle rather than hardcoded. A bundle without
+/// a `config.json` (or without the key) yields an empty set: nothing is marked
+/// terminal, which is exactly the behaviour before this existed.
+fn load_eos_ids(model_dir: &Path) -> std::collections::BTreeSet<u32> {
+    let Ok(bytes) = fs::read(model_dir.join("config.json")) else {
+        return Default::default();
+    };
+    let Ok(config) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return Default::default();
+    };
+    let declared = config
+        .get("eos_token_id")
+        .or_else(|| config.get("text_config").and_then(|t| t.get("eos_token_id")));
+    match declared {
+        Some(serde_json::Value::Number(id)) => {
+            id.as_u64().map(|id| id as u32).into_iter().collect()
+        }
+        Some(serde_json::Value::Array(ids)) => ids
+            .iter()
+            .filter_map(serde_json::Value::as_u64)
+            .map(|id| id as u32)
+            .collect(),
+        _ => Default::default(),
+    }
+}
+
 fn write_tokenizer(
     tokenizer: &serde_json::Value,
     prompt: &str,
+    raw_prompt: bool,
+    eos_ids: &std::collections::BTreeSet<u32>,
     stages: &mut Vec<String>,
 ) -> Result<String, Box<dyn Error>> {
     let model = tokenizer.get("model").ok_or("tokenizer.json has no model")?;
@@ -645,6 +709,25 @@ fn write_tokenizer(
         .filter_map(|entry| entry.get("id").and_then(serde_json::Value::as_u64))
         .map(|id| id as u32)
         .collect();
+
+    // The same entries by text, longest first, so `split_prompt` can keep each
+    // one whole and prefer the longer of two that share a prefix.
+    let mut special_tokens: Vec<String> = tokenizer
+        .get("added_tokens")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .get("special")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        })
+        .filter_map(|entry| entry.get("content").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .collect();
+    special_tokens.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+
     let max_token_id = vocab.iter().map(|entry| entry.id).max().unwrap_or(0);
     let mut decoder_tokens =
         vec![DecoderToken::default(); max_token_id.saturating_add(1) as usize];
@@ -652,6 +735,7 @@ fn write_tokenizer(
         decoder_tokens[entry.id as usize] = DecoderToken {
             token: entry.token.clone(),
             special: special_ids.contains(&entry.id),
+            terminal: eos_ids.contains(&entry.id),
         };
     }
     let decoder_commitment = write_external(
@@ -677,8 +761,39 @@ fn write_tokenizer(
         })
         .unwrap_or_default();
 
-    let pieces = split_prompt(prompt, &vocab_map);
+    // An instruction-tuned model answers inside a turn it was asked to open.
+    // Templating is therefore the default, and dropping to the bare prompt is
+    // an explicit choice — either the caller's, or forced by a tokenizer that
+    // has no turn markers to template with.
+    let templated = !raw_prompt && supports_gemma_turns(&vocab_map);
+    if !raw_prompt && !templated {
+        println!(
+            "prompt: no {TURN_OPEN}/{TURN_CLOSE}/{BOS_TOKEN} in this vocabulary — \
+             committing the bare prompt"
+        );
+    }
+    let rendered = if templated {
+        render_gemma_turns(prompt)
+    } else {
+        prompt.to_string()
+    };
+    let pieces = if templated {
+        split_prompt(&rendered, &vocab_map, &special_tokens)
+    } else {
+        split_prompt(&rendered, &vocab_map, &[])
+    };
+
     println!("tokenizer: {} entries, {} merges", vocab.len(), merges.len());
+    println!(
+        "prompt: {} · {} terminal id(s)",
+        if templated {
+            "gemma turn template"
+        } else {
+            "raw"
+        },
+        eos_ids.len()
+    );
+    println!("rendered prompt: {rendered:?}");
     println!("prompt pieces: {pieces:?}");
 
     let (vocab_bucket_count, vocab_buckets) = bucket_vocab(vocab);
@@ -828,19 +943,58 @@ fn parse_merge(rank: u32, entry: &serde_json::Value) -> Option<BpeMerge> {
     })
 }
 
+/// Renders one user message plus the generation prompt, the way the model's
+/// `chat_template.jinja` does for `add_generation_prompt: true`.
+fn render_gemma_turns(prompt: &str) -> String {
+    format!(
+        "{BOS_TOKEN}{TURN_OPEN}user\n{}{TURN_CLOSE}\n{TURN_OPEN}model\n",
+        prompt.trim()
+    )
+}
+
+/// Whether this tokenizer has the tokens the turn format is made of.
+///
+/// `tiny-gemma-dev` does not: templating against it would emit pieces the
+/// vocabulary pass resolves to `<unk>`, which is worse than the bare prompt.
+fn supports_gemma_turns(vocab: &BTreeMap<String, u32>) -> bool {
+    [BOS_TOKEN, TURN_OPEN, TURN_CLOSE, NEWLINE_TOKEN]
+        .iter()
+        .all(|token| vocab.contains_key(*token))
+}
+
 /// Splits a prompt into the initial pieces the tokenizer stage consumes:
-/// SentencePiece's space marker, one piece per character, byte-fallback for
-/// anything the vocabulary does not have, and the end-of-word terminator.
-fn split_prompt(prompt: &str, vocab: &BTreeMap<String, u32>) -> Vec<String> {
+/// whole special tokens, then SentencePiece's space marker, one piece per
+/// character, byte-fallback for anything the vocabulary does not have, and the
+/// end-of-word terminator.
+///
+/// `specials` is matched longest-first and never split. A special token is a
+/// single vocabulary entry whose text is several characters, and no merge rule
+/// mentions one — so the merge pass could never reassemble it from characters,
+/// and every turn marker would tokenize as its own punctuation.
+fn split_prompt(prompt: &str, vocab: &BTreeMap<String, u32>, specials: &[String]) -> Vec<String> {
     let mut pieces = Vec::new();
-    for ch in prompt.replace(' ', "\u{2581}").chars() {
-        let piece = ch.to_string();
+    let mut rest = prompt;
+    while !rest.is_empty() {
+        if let Some(special) = specials.iter().find(|token| rest.starts_with(token.as_str())) {
+            pieces.push(special.clone());
+            rest = &rest[special.len()..];
+            continue;
+        }
+        let ch = rest.chars().next().expect("rest is non-empty");
+        rest = &rest[ch.len_utf8()..];
+        let piece = if ch == ' ' {
+            String::from('\u{2581}')
+        } else {
+            ch.to_string()
+        };
         if vocab.contains_key(&piece) {
             pieces.push(piece);
         } else {
             // Byte fallback: `<0xNN>` per UTF-8 byte, as the tokenizer declares.
-            let mut buffer = [0u8; 4];
-            for byte in ch.encode_utf8(&mut buffer).as_bytes() {
+            // Over the *piece*, not the source character: a space that reached
+            // here is `▁`, and its three bytes are what the vocabulary would
+            // have to spell.
+            for byte in piece.as_bytes() {
                 pieces.push(format!("<0x{byte:02X}>"));
             }
         }

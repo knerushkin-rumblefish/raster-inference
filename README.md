@@ -54,6 +54,26 @@ With the checked-in fixture (`prompt "hello▁world"`):
 
 ## Model decisions worth knowing
 
+**The prompt is wrapped in Gemma's turn format.** An instruction-tuned model
+was trained to answer inside a turn it was asked to open. A bare prompt is a
+fragment to it, so the continuation it produces is a turn break rather than an
+answer: `What is ZK?` committed as five raw tokens generated `\n\n` and then
+`<turn|>`, which is the correct continuation of that input and not an answer to
+it. `model-import` therefore renders one user message plus the generation
+prompt the way the model's `chat_template.jinja` does —
+
+```text
+<bos><|turn>user\n{prompt}<turn|>\n<|turn>model\n
+```
+
+— and `split_prompt` emits each special token as a whole piece. It has to: a
+special token is one vocabulary entry several characters long and no merge rule
+mentions one, so the merge pass could never reassemble `<|turn>` from `<`, `|`,
+`t`, … There is no Jinja engine here, so that one shape is written out directly
+rather than rendered from the bundle's template. `--raw-prompt` commits the
+prompt exactly as given; a tokenizer with no turn markers in its vocabulary
+(`tiny-gemma-dev`) falls back to that automatically.
+
 **The merge pass is a single left-to-right pass, not multi-round BPE.**
 Classic BPE repeats "find the globally best merge, rewrite the whole piece
 list" until no rule applies. That shape is not expressible in Raster: each
@@ -412,7 +432,15 @@ cargo raster chain run --no-auth       # fast functional check
 
 The final `output_finalize` stage publishes `generated_token_count`,
 `generated_token_ids`, their reference-compatible SHA-256, decoded text, and
-`stop_reason`. `Raster.toml.prefill-only` is the generated `--tokens 0` boundary
+`stop_reason`.
+
+`stop_reason` is `eos` when a generated token is in the bundle's
+`eos_token_id` set (`model-import` reads it from `config.json` and marks those
+ids `terminal` in the decoder table), and `max_new_tokens` otherwise. The
+repeat count is a static unroll, so decoding cannot actually stop early:
+everything generated after the terminal token stays in `generated_token_ids`
+and its SHA-256 — it was generated — but it is a new turn, not the answer, so
+`generated_text` ends where the model ended. `Raster.toml.prefill-only` is the generated `--tokens 0` boundary
 fixture; it still runs `decode_init` and `output_finalize` so empty generation is
 tested end to end.
 

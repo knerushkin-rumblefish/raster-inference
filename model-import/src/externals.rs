@@ -84,6 +84,7 @@ pub struct BpePieces {
 pub struct DecoderToken {
     pub token: String,
     pub special: bool,
+    pub terminal: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
