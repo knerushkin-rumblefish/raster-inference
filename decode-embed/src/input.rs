@@ -1,4 +1,8 @@
-//! Shared Rastered data types for the `input-embedding` stage.
+//! Shared Rastered data types for the `decode-embed` stage.
+//!
+//! Every boundary type here is a field-for-field copy of its twin in
+//! `input-embedding` / `decode-select-token` — the chain links by structural
+//! commitment, not by Rust type name, so a reordered field is a broken link.
 
 extern crate alloc;
 
@@ -36,6 +40,24 @@ pub struct EmbeddingTable {
     pub embedding_scale: i32,
     #[page_size = 196_608]
     pub values: Bytes<196_608>,
+}
+
+/// The committed input: `decode-select-token`'s authorized output.
+///
+/// MUST match `DecodeEdge` in `decode-select-token` field-for-field.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+pub struct DecodeEdge {
+    /// False only on `decode-init`'s empty edge, which is never sent to this
+    /// program when the repeat count is zero.
+    pub has_selected: bool,
+    /// Absolute position this token occupies — `prompt_len` on the first decode
+    /// step, one more on each after. Produced by `prefill-finalize` as
+    /// `start_position + token_count`, so it is already absolute and needs no
+    /// adjustment here.
+    pub decode_position: u32,
+    pub token_id: u32,
+    pub value: i32,
+    pub generated_token_ids: List<u32>,
 }
 
 /// Loop-carried summary of failed rows: how many, and the first message.

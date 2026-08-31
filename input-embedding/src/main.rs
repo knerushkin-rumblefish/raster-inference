@@ -47,10 +47,11 @@ fn main(prompt: PromptTokenization, embedding: EmbeddingTable) -> Result<Activat
     let embedding_scale = select!(i32, embedding.clone().embedding_scale);
     let values = select!(Bytes<196_608>, embedding.values);
 
+    let draft = call!(begin_prompt_activations, new!(ActivationSequence));
     let embedded = call_recur_seq!(
         sequence = embed_prompt_token,
         input = token_ids,
-        output = new!(ActivationSequence),
+        output = draft,
         args = (values, hidden_size, page_size, embedding_scale)
     );
     raster::println!("embedding pass → {:?}", embedded);

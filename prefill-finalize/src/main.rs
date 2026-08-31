@@ -20,6 +20,7 @@ fn main(activations: ActivationSequence, head: FinalHead) -> Result<PrefillLogit
     let params = select!(FinalHeadParams, head.clone().params);
     let params = call!(validate_final_head, params)?;
 
+    let start_position = select!(u32, activations.clone().start_position);
     let rows = select!(List<ActivationRow>, activations.rows);
     let empty = call!(empty_final_position);
     let position = call_recur!(
@@ -31,7 +32,7 @@ fn main(activations: ActivationSequence, head: FinalHead) -> Result<PrefillLogit
 
     let normalized = call!(normalize_final_position, position.clone(), params.clone())?;
 
-    let draft = call!(begin_logits, new!(PrefillLogits), position);
+    let draft = call!(begin_logits, new!(PrefillLogits), position, start_position);
 
     let pages = select!(List<BytesPage>, head.projection.pages);
     let logits = call_recur!(

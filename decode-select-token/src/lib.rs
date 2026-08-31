@@ -59,3 +59,45 @@ pub fn finish_selection(state: ArgmaxState, decode_position: u32) -> Result<Sele
         value: state.value,
     })
 }
+
+/// Opens the next decode edge and publishes the selected-token scalars.
+#[tile(kind = iter, description = "Open a decode edge for the selected token")]
+pub fn begin_decode_edge(
+    output: Draft<DecodeEdge>,
+    selected: SelectedToken,
+) -> Draft<DecodeEdge> {
+    let mut output = output;
+    output.has_selected().set(true);
+    output.decode_position().set(selected.decode_position);
+    output.token_id().set(selected.token_id);
+    output.value().set(selected.value);
+    output
+}
+
+/// Copies a bounded chunk of the prior transcript into the next edge.
+///
+/// The draft stays open after the recur so [`append_selected_token`] can add
+/// this iteration's token. Transcript copying is linear in the number of
+/// already-generated tokens and does not materialize the whole list.
+#[tile(kind = recur, description = "Copy prior generated token ids")]
+pub fn copy_generated_token_ids(
+    input: RecurInput<Block<u32>>,
+    output: RecurOutput<DecodeEdge>,
+) -> RecurOutput<DecodeEdge> {
+    let mut output = output;
+    for token_id in input.into_value() {
+        output.generated_token_ids().push(token_id);
+    }
+    output
+}
+
+/// Appends exactly the token selected by this stage.
+#[tile(kind = iter, description = "Append the selected generated token")]
+pub fn append_selected_token(
+    output: Draft<DecodeEdge>,
+    selected: SelectedToken,
+) -> Draft<DecodeEdge> {
+    let mut output = output;
+    output.generated_token_ids().push(selected.token_id);
+    output
+}

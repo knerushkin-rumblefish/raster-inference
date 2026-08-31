@@ -1,7 +1,8 @@
 //! Phase 6 — `decode_select_token`: sequences.
 //!
 //! ```text
-//!   logits ──recur (chunk = 256)──▶ running argmax ──▶ SelectedToken
+//!   logits ──recur (chunk = 256)──▶ running argmax
+//!   prior.generated_token_ids ──recur──▶ copy · append selected ──▶ DecodeEdge
 //! ```
 //!
 //! `chunk` is the only tuning knob here. The vocabulary is 262,144 entries, so
@@ -15,11 +16,13 @@ use raster::prelude::*;
 use decode_select_token::input::*;
 use decode_select_token::*;
 
-/// Phase 6 entrypoint.
+/// One decode iteration's selection entrypoint.
 ///
-/// `logits` is bound by the chain to `prefill_finalize`'s authorized output.
+/// `logits` comes from prefill on iteration zero and from the prior transition
+/// afterwards. `prior` comes from `decode-init` on iteration zero and from the
+/// prior selection afterwards.
 #[sequence]
-fn main(logits: PrefillLogits) -> Result<SelectedToken> {
+fn main(logits: PrefillLogits, prior: DecodeEdge) -> Result<DecodeEdge> {
     let decode_position = select!(u32, logits.clone().decode_position);
     let scores = select!(List<LogitEntry>, logits.logits);
 
@@ -36,5 +39,21 @@ fn main(logits: PrefillLogits) -> Result<SelectedToken> {
     );
 
     let selected = call!(finish_selection, best, decode_position)?;
-    Ok(selected)
+    let draft = call!(
+        begin_decode_edge,
+        new!(DecodeEdge),
+        clone!(selected)
+    );
+    let prior_ids = select!(List<u32>, prior.generated_token_ids);
+    let draft = call_recur!(
+        tile = copy_generated_token_ids,
+        input = prior_ids,
+        chunk = 64,
+        output = draft,
+        finalize = false,
+        args = ()
+    );
+    let draft = call!(append_selected_token, draft, selected);
+    let edge = finalize(draft);
+    Ok(edge)
 }

@@ -41,11 +41,24 @@ pub struct ActivationRow {
 pub struct ActivationSequence {
     pub rows: List<ActivationRow>,
     pub errors: List<String>,
-    /// This layer's own K/V cache, carried so a later sharing layer can attend
-    /// over it. Empty on stages that donate to nobody — which is every stage
-    /// except layers 13 and 14 — and ignored by every consumer that is not a
-    /// sharing layer.
+    /// This layer's K/V cache after this stage: everything it was handed as
+    /// `prior_kv`, pruned to the sliding window, plus one row per token this
+    /// stage processed.
+    ///
+    /// Every layer publishes it, and it is read by two different consumers: a
+    /// later *sharing* layer attends over its donor's cache in the same step,
+    /// and the *same* layer one decode step later takes it as `prior_kv`. A
+    /// layer that is neither a donor nor decoded again still pays to publish
+    /// it, which is the price of one uniform program across all 35 stages.
     pub kv: List<KeyRow>,
+    /// Absolute position of `rows[0]` in the full sequence — 0 for the prompt,
+    /// `prompt_len + t` for decode step `t`.
+    ///
+    /// Positions cannot be recovered by counting: a decode stage sees one row
+    /// but sits at position `prompt_len + t`, and RoPE and sliding-window
+    /// visibility are both defined over the absolute value. Carrying it
+    /// explicitly is what lets one program serve prefill and decode.
+    pub start_position: u32,
 }
 
 // ---------------------------------------------------------------------------

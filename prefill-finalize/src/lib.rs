@@ -106,9 +106,15 @@ pub fn normalize_final_position(
 pub fn begin_logits(
     output: Draft<PrefillLogits>,
     position: FinalPosition,
+    start_position: u32,
 ) -> Draft<PrefillLogits> {
     let mut output = output;
-    output.decode_position().set(position.token_count);
+    // Absolute, not a count. `token_count` alone is the position of the next
+    // token only when the stage started at zero; a decode stage sees one row
+    // and would otherwise report position 1 no matter how far in it is.
+    output
+        .decode_position()
+        .set(start_position + position.token_count);
     output
 }
 

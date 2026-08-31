@@ -1,0 +1,38 @@
+{
+  "format": 1,
+  "program_commitment": "67cbe21c70bb0a6f71f7f7280351ff141b2ba7a76501fa4c3bd9e4bfb71734cc",
+  "tiles": {
+    "append_activation_row": {
+      "image_id": "9070778d57cafafd3a10ac6fb5cd7e85b2d610cb2df937ad0238bfab040eed07",
+      "source_hash": "db98b30fc1318a9f0000000000001258"
+    },
+    "assert_all_tokens_embedded": {
+      "image_id": "f9ee8ae2242edf1cb6ff38d2fd1fa3155aac73f4dfbf61e183395ac2b782961a",
+      "source_hash": "db98b30fc1318a9f0000000000001258"
+    },
+    "begin_decode_activations": {
+      "image_id": "6738e1e83db292f360d8715049ac94f0988dca6ebcf1c48b8b98ccc80512fbfa",
+      "source_hash": "db98b30fc1318a9f0000000000001258"
+    },
+    "embedding_byte_offset": {
+      "image_id": "e8387bcfc13e4f7892d39f775d7746a904025c7e824389c6e12617f133378436",
+      "source_hash": "db98b30fc1318a9f0000000000001258"
+    },
+    "page_of": {
+      "image_id": "287267d03b56c584e61bcc31b7487aee6facf1a380675feead391dfc6e6f591e",
+      "source_hash": "db98b30fc1318a9f0000000000001258"
+    },
+    "require_selected_token": {
+      "image_id": "a14e648e2c44d42ae8c9ace255308e822bb96daf2d69b345dc1495d6e3cdf666",
+      "source_hash": "db98b30fc1318a9f0000000000001258"
+    },
+    "summarise_errors": {
+      "image_id": "156a5b778367220116dda81aae12149def50ac74bd52c876da5f0016898c2b0a",
+      "source_hash": "db98b30fc1318a9f0000000000001258"
+    }
+  },
+  "toolchain": {
+    "risc0": "risc0-zkvm-1.2",
+    "build_mode": "local"
+  }
+}
