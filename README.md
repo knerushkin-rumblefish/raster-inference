@@ -8,8 +8,11 @@ phase, expanded per layer and generated token.
 ```sh
 cargo run --manifest-path model-import/Cargo.toml -- \
   --model ../raster-inference/assets/tiny-gemma-dev --prompt "hello raster"
-cargo raster chain run && cargo raster chain audit --execution
+cargo raster chain run --show-output && cargo raster chain audit --execution
 ```
+
+`--show-output` is what prints the generated text; without it a chain run
+reports only per-stage commitments. See [Generating N tokens](#generating-n-tokens).
 
 ```text
    tokenizer      embedding      ple layers    layer weights     head
@@ -427,12 +430,34 @@ cargo run --manifest-path model-import/Cargo.toml -- \
   --tokens 3 \
   --manifest Raster.toml
 
-cargo raster chain run --no-auth       # fast functional check
+cargo raster chain run --no-auth --show-output    # fast functional check
 ```
 
 The final `output_finalize` stage publishes `generated_token_count`,
 `generated_token_ids`, their reference-compatible SHA-256, decoded text, and
-`stop_reason`.
+`stop_reason` — but a chain run prints per-stage digests, not values, so
+without `--show-output` the generated text never reaches the terminal.
+`--show-output` renders the last stage's `output.bin` when the run finishes:
+
+```text
+Program output value (output_finalize):
+  {
+    generated_token_count: 2u32
+    generated_token_ids: [2] [ 236775u32 229361u32 ]
+    generated_token_ids_sha256: "fd22a039…"
+    generated_text: "\"ZK"
+    stop_reason: "max_new_tokens"
+  }
+  commitment 2b5bb726c88cf7fd…  ✓ matches .rindex
+```
+
+Every stage's artifact stays on disk, so the same reader works after the fact
+on any of them — which is how you read a middle stage without re-running:
+
+```sh
+cargo raster show target/raster/chains-no-auth/latest/output_finalize/output.bin
+cargo raster show target/raster/chains-no-auth/latest/prompt_prepare/output.bin
+```
 
 `stop_reason` is `eos` when a generated token is in the bundle's
 `eos_token_id` set (`model-import` reads it from `config.json` and marks those
@@ -466,7 +491,7 @@ for d in prompt-prepare input-embedding prefill-prepare-aux prefill-range \
 done
 
 # Functional execution:
-cargo raster chain run --no-auth
+cargo raster chain run --no-auth --show-output
 ```
 
 Authenticated chain execution is currently blocked by Raster's open
