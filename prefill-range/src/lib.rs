@@ -79,6 +79,23 @@ pub fn validate_layer_params(params: LayerParams) -> Result<LayerParams> {
     if params.norm_eps < 0 {
         return Err(String::from("rms-norm epsilon must be non-negative"));
     }
+    if params.donor_a_layer == -1 || params.donor_b_layer == -1 {
+        return Err(String::from(
+            "donor candidate -1 is reserved for a layer's own cache",
+        ));
+    }
+    if params.kv_donor_layer >= 0
+        && params.kv_donor_layer != params.donor_a_layer
+        && params.kv_donor_layer != params.donor_b_layer
+    {
+        return Err(alloc::format!(
+            "layer {} borrows K/V from {}, outside committed candidates {} and {}",
+            params.layer_idx,
+            params.kv_donor_layer,
+            params.donor_a_layer,
+            params.donor_b_layer
+        ));
+    }
 
     let checks: [(&str, &BytesPage, usize); 6] = [
         ("norm_input", &params.norm_input, hidden),
@@ -487,13 +504,13 @@ pub fn score_key(
     state: RecurState<ScoreAccum>,
     query: QueryRow,
     params: LayerParams,
-    donor_pass: bool,
+    source_layer: i32,
 ) -> RecurState<ScoreAccum> {
     let mut state = state;
     if !state.error.is_empty() {
         return state;
     }
-    if (params.kv_donor_layer >= 0) != donor_pass {
+    if params.kv_donor_layer != source_layer {
         return state;
     }
     let keys = input.into_value();
@@ -643,13 +660,13 @@ pub fn accumulate_context(
     query: QueryRow,
     weights: WeightVec,
     params: LayerParams,
-    donor_pass: bool,
+    source_layer: i32,
 ) -> RecurState<CtxAccum> {
     let mut state = state;
     if !state.error.is_empty() {
         return state;
     }
-    if (params.kv_donor_layer >= 0) != donor_pass {
+    if params.kv_donor_layer != source_layer {
         return state;
     }
     let keys = input.into_value();
@@ -787,7 +804,7 @@ pub fn attend_kv_chunk(
     state: RecurState<AttnState>,
     query: QueryRow,
     params: LayerParams,
-    donor_pass: bool,
+    source_layer: i32,
 ) -> RecurState<AttnState> {
     let mut state = state;
     if !state.error.is_empty() {
@@ -798,7 +815,7 @@ pub fn attend_kv_chunk(
     // last 20 layers attend over an earlier layer's cache; the rest attend over
     // their own. The two passes chain one `AttnState`, so the streaming softmax
     // is identical to a single pass over whichever list applies.
-    if (params.kv_donor_layer >= 0) != donor_pass {
+    if params.kv_donor_layer != source_layer {
         return state;
     }
     let key = input.into_value();

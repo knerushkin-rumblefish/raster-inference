@@ -122,6 +122,11 @@ pub struct LayerParams {
     /// never runs `w_k`/`w_v` at all. `-1` rather than `Option` because the
     /// value crosses a tile boundary and must stay a plain scalar.
     pub kv_donor_layer: i32,
+    /// The two donor layers carried uniformly by every stage. Values are model
+    /// facts committed with the layer parameters; unused slots are negative
+    /// values other than `-1`, which is reserved for a layer's own cache.
+    pub donor_a_layer: i32,
+    pub donor_b_layer: i32,
     pub norm_input: BytesPage,
     pub norm_post_attn: BytesPage,
     pub norm_pre_ffw: BytesPage,

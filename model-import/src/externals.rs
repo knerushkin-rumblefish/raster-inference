@@ -78,6 +78,19 @@ pub struct BpePieces {
     pub pieces: List<String>,
 }
 
+// --- output-finalize -------------------------------------------------------
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+pub struct DecoderToken {
+    pub token: String,
+    pub special: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+pub struct DecoderTable {
+    pub tokens: List<DecoderToken>,
+}
+
 // --- input-embedding --------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
@@ -129,6 +142,8 @@ pub struct LayerParams {
     pub rotary_dim: u32,
     pub rope_freq_base_dim: u32,
     pub kv_donor_layer: i32,
+    pub donor_a_layer: i32,
+    pub donor_b_layer: i32,
     pub norm_input: BytesPage,
     pub norm_post_attn: BytesPage,
     pub norm_pre_ffw: BytesPage,

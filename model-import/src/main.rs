@@ -41,6 +41,11 @@ fn main() {
 struct Args {
     model_dir: PathBuf,
     prompt: String,
+    /// Exact number of generated tokens. The decode loop is statically
+    /// expanded to this many select+transition iterations.
+    tokens: u32,
+    /// Write the complete chain manifest here instead of printing it.
+    manifest: Option<PathBuf>,
     /// Rewrite only the tokenizer externals, leaving the weight externals
     /// alone. The weights are ~9 GB and depend on nothing the tokenizer
     /// touches, so a prompt or vocabulary-layout change has no reason to
@@ -61,6 +66,8 @@ struct Args {
 fn parse_args() -> Result<Args, Box<dyn Error>> {
     let mut model_dir = None;
     let mut prompt = String::from("hello raster");
+    let mut tokens = 1u32;
+    let mut manifest = None;
     let mut only_tokenizer = false;
     let mut only_layers = false;
     let mut only_embedding = false;
@@ -70,6 +77,14 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
         match arg.as_str() {
             "--model" => model_dir = args.next().map(PathBuf::from),
             "--prompt" => prompt = args.next().ok_or("--prompt needs a value")?,
+            "--tokens" => {
+                tokens = args
+                    .next()
+                    .ok_or("--tokens needs a value")?
+                    .parse()
+                    .map_err(|_| "--tokens must be a non-negative integer")?
+            }
+            "--manifest" => manifest = args.next().map(PathBuf::from),
             "--only-tokenizer" => only_tokenizer = true,
             "--only-layers" => only_layers = true,
             "--only-embedding" => only_embedding = true,
@@ -80,6 +95,8 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
     Ok(Args {
         model_dir: model_dir.ok_or("--model <bundle-dir> is required")?,
         prompt,
+        tokens,
+        manifest,
         only_tokenizer,
         only_layers,
         only_embedding,
@@ -94,13 +111,23 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     if args.only_tokenizer {
         let mut stages = Vec::new();
-        write_tokenizer(&tokenizer, &args.prompt, &mut stages)?;
+        let decoder_commitment = write_tokenizer(&tokenizer, &args.prompt, &mut stages)?;
         println!();
-        println!("# ---- replaces the prompt_prepare stage in the root Raster.toml ----");
+        println!("# ---- replaces prompt and decoder externals in the root Raster.toml ----");
         for stage in &stages {
             println!();
             print!("{stage}");
         }
+        println!();
+        println!(
+            "{}",
+            external_line(
+                "decoder",
+                "output-finalize",
+                "decoder",
+                &decoder_commitment
+            )
+        );
         return Ok(());
     }
 
@@ -160,22 +187,227 @@ fn run() -> Result<(), Box<dyn Error>> {
     println!();
 
     let mut stages = Vec::new();
-    write_tokenizer(&tokenizer, &args.prompt, &mut stages)?;
+    let decoder_commitment = write_tokenizer(&tokenizer, &args.prompt, &mut stages)?;
     write_embedding(&weights, &shape, &mut stages)?;
     write_ple_layers(&weights, &shape, &mut stages)?;
     write_transformer_layers(&weights, &shape, &mut stages)?;
     write_head(&weights, &shape, text, &mut stages)?;
 
-    println!();
-    println!("# ---- root Raster.toml ----");
-    println!("[chain]");
-    println!("name = \"raster-chain-inference\"");
-    println!("version = \"0.1.0\"");
+    let mut manifest = String::from(
+        "[chain]\nname = \"raster-chain-inference\"\nversion = \"0.1.0\"\n",
+    );
+    manifest.push_str(&indexed_model_inputs(&shape, &stages)?);
     for stage in &stages {
+        manifest.push('\n');
+        manifest.push_str(stage);
+    }
+    manifest.push_str(&generation_stages(
+        &shape,
+        &decoder_commitment,
+        args.tokens,
+        &stages,
+    )?);
+    if let Some(path) = args.manifest {
+        fs::write(&path, manifest)?;
+        println!("wrote {}", path.display());
+    } else {
         println!();
-        print!("{stage}");
+        println!("# ---- root Raster.toml ----");
+        print!("{manifest}");
     }
     Ok(())
+}
+
+fn stage_external_commitment(
+    stages: &[String],
+    stage_name: &str,
+    parameter: &str,
+) -> Result<String, Box<dyn Error>> {
+    let name = format!("name = \"{stage_name}\"");
+    let prefix = format!("inputs.{parameter} = ");
+    let line = stages
+        .iter()
+        .find(|stage| stage.lines().any(|line| line == name))
+        .and_then(|stage| stage.lines().find(|line| line.starts_with(&prefix)))
+        .ok_or_else(|| {
+            format!("generated prefill manifest has no {stage_name}.{parameter} binding")
+        })?;
+    let marker = "commitment = \"";
+    let start = line
+        .find(marker)
+        .ok_or_else(|| format!("{stage_name}.{parameter} is not an external binding"))?
+        + marker.len();
+    let end = line[start..]
+        .find('"')
+        .ok_or_else(|| format!("{stage_name}.{parameter} has an unterminated commitment"))?
+        + start;
+    Ok(line[start..end].to_string())
+}
+
+/// Declares model weights once so every decode iteration can bind them by its
+/// static layer index without copying commitments into the repeat block.
+fn indexed_model_inputs(shape: &Shape, stages: &[String]) -> Result<String, Box<dyn Error>> {
+    let aux = (0..shape.layers)
+        .map(|layer| {
+            stage_external_commitment(
+                stages,
+                &format!("prefill_prepare_aux_l{layer}"),
+                "layer",
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let transformer = (0..shape.layers)
+        .map(|layer| {
+            stage_external_commitment(stages, &format!("prefill_range_l{layer}"), "layer")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let render = |name: &str, dir: &str, commitments: &[String]| {
+        let entries = commitments
+            .iter()
+            .enumerate()
+            .map(|(index, commitment)| format!("  \"{commitment}\", # l{index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "\n[chain.input.{name}]\n\
+             index = \"l\"\n\
+             path = \"{dir}/layer{{l}}.rastered\"\n\
+             index_path = \"{dir}/layer{{l}}.rindex\"\n\
+             commitments = [\n{entries}\n]\n"
+        )
+    };
+    Ok(format!(
+        "{}{}",
+        render("aux_layer", "prefill-prepare-aux", &aux),
+        render("transformer_layer", "prefill-range", &transformer)
+    ))
+}
+
+/// Emits exactly `tokens` select+transition iterations as one static repeat.
+/// Expansion still produces one auditable chain stage per program invocation.
+fn generation_stages(
+    shape: &Shape,
+    decoder_commitment: &str,
+    tokens: u32,
+    prefill_stages: &[String],
+) -> Result<String, Box<dyn Error>> {
+    let embedding = stage_external_commitment(prefill_stages, "input_embedding", "embedding")?;
+    let head = stage_external_commitment(prefill_stages, "prefill_finalize", "head")?;
+    let first_shared = shape.layers.saturating_sub(shape.num_kv_shared_layers);
+    let mut donors = (0..shape.layers)
+        .map(|layer| shape.kv_donor_layer(layer))
+        .filter(|donor| *donor >= 0)
+        .collect::<Vec<_>>();
+    donors.sort_unstable();
+    donors.dedup();
+    if donors.len() > 2 {
+        return Err(format!(
+            "decode repeat supports at most two donor candidates, model declares {}",
+            donors.len()
+        )
+        .into());
+    }
+    let donor_a = donors.first().copied();
+    let donor_b = donors.get(1).copied();
+
+    let mut out = String::from(
+        "\n[[chain.stage]]\nname = \"decode_init\"\nproject = \"decode-init\"\n\
+         \n[[chain.repeat]]\nname = \"decode\"\nindex = \"t\"\n",
+    );
+    out.push_str(&format!("count = {tokens}\n"));
+    out.push_str(
+        "\n  [chain.repeat.exports.edge]\n\
+         stage = \"decode_select_t{t}\"\n\
+         entry = \"decode_init\"\n\
+         \n  [chain.repeat.exports.logits]\n\
+         stage = \"decode_finalize_t{t}\"\n\
+         entry = \"prefill_finalize\"\n\
+         \n  [[chain.repeat.stage]]\n\
+         name = \"decode_select_t{t}\"\n\
+         project = \"decode-select-token\"\n\
+         inputs.logits = { from = \"decode_finalize_t{t-1}\", first = \"prefill_finalize\" }\n\
+         inputs.prior = { from = \"decode_select_t{t-1}\", first = \"decode_init\" }\n\
+         \n  [[chain.repeat.stage]]\n\
+         name = \"decode_embed_t{t}\"\n\
+         project = \"decode-embed\"\n\
+         inputs.selected = { from = \"decode_select_t{t}\" }\n",
+    );
+    out.push_str(&format!(
+        "  inputs.embedding = {{ external = {{ path = \"input-embedding/embedding.rastered\", index_path = \"input-embedding/embedding.rindex\", commitment = \"{embedding}\" }} }}\n"
+    ));
+    out.push_str(&format!(
+        "\n  [[chain.repeat.stage]]\n\
+         name = \"decode_aux_t{{t}}_l{{l}}\"\n\
+         index = \"l\"\n\
+         count = {}\n\
+         project = \"prefill-prepare-aux\"\n\
+         inputs.embedded = {{ from = \"decode_embed_t{{t}}\" }}\n\
+         inputs.layer = {{ input = \"aux_layer_{{l}}\" }}\n",
+        shape.layers
+    ));
+
+    if first_shared > 0 {
+        out.push_str(&format!(
+            "\n  [[chain.repeat.stage]]\n\
+             name = \"decode_range_t{{t}}_l{{l}}\"\n\
+             index = \"l\"\n\
+             start = 0\n\
+             count = {first_shared}\n\
+             project = \"prefill-range\"\n\
+             inputs.activations = {{ from = \"decode_range_t{{t}}_l{{l-1}}\", first = \"decode_embed_t{{t}}\" }}\n\
+             inputs.prior_kv = {{ from = \"decode_range_t{{t-1}}_l{{l}}\", first = \"prefill_range_l{{l}}\" }}\n\
+             inputs.donor_a_kv = {{ from = \"input_embedding\" }}\n\
+             inputs.donor_b_kv = {{ from = \"input_embedding\" }}\n\
+             inputs.ple = {{ from = \"decode_aux_t{{t}}_l{{l}}\" }}\n\
+             inputs.layer = {{ input = \"transformer_layer_{{l}}\" }}\n"
+        ));
+    }
+
+    if shape.num_kv_shared_layers > 0 {
+        let donor_a_from = donor_a
+            .map(|layer| format!("decode_range_t{{t}}_l{layer}"))
+            .unwrap_or_else(|| String::from("input_embedding"));
+        let donor_b_from = donor_b
+            .map(|layer| format!("decode_range_t{{t}}_l{layer}"))
+            .unwrap_or_else(|| String::from("input_embedding"));
+        out.push_str(&format!(
+            "\n  [[chain.repeat.stage]]\n\
+             name = \"decode_range_t{{t}}_l{{l}}\"\n\
+             index = \"l\"\n\
+             start = {first_shared}\n\
+             count = {}\n\
+             project = \"prefill-range\"\n\
+             inputs.activations = {{ from = \"decode_range_t{{t}}_l{{l-1}}\", first = \"decode_range_t{{t}}_l{}\" }}\n\
+             inputs.prior_kv = {{ from = \"decode_range_t{{t-1}}_l{{l}}\", first = \"prefill_range_l{{l}}\" }}\n\
+             inputs.donor_a_kv = {{ from = \"{donor_a_from}\" }}\n\
+             inputs.donor_b_kv = {{ from = \"{donor_b_from}\" }}\n\
+             inputs.ple = {{ from = \"decode_aux_t{{t}}_l{{l}}\" }}\n\
+             inputs.layer = {{ input = \"transformer_layer_{{l}}\" }}\n",
+            shape.num_kv_shared_layers,
+            first_shared.saturating_sub(1)
+        ));
+    }
+
+    out.push_str(&format!(
+        "\n  [[chain.repeat.stage]]\n\
+         name = \"decode_finalize_t{{t}}\"\n\
+         project = \"prefill-finalize\"\n\
+         inputs.activations = {{ from = \"decode_range_t{{t}}_l{}\" }}\n\
+         inputs.head = {{ external = {{ path = \"prefill-finalize/head.rastered\", index_path = \"prefill-finalize/head.rindex\", commitment = \"{head}\" }} }}\n\
+         \n[[chain.stage]]\n\
+         name = \"output_finalize\"\n\
+         project = \"output-finalize\"\n\
+         inputs.edge = {{ from = \"decode.edge\" }}\n\
+         {}",
+        shape.layers - 1,
+        external_line(
+            "decoder",
+            "output-finalize",
+            "decoder",
+            decoder_commitment
+        )
+    ));
+    Ok(out)
 }
 
 /// Q16.16 bits of an `f32`, through the reference's own conversion so the
@@ -377,7 +609,7 @@ fn write_tokenizer(
     tokenizer: &serde_json::Value,
     prompt: &str,
     stages: &mut Vec<String>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<String, Box<dyn Error>> {
     let model = tokenizer.get("model").ok_or("tokenizer.json has no model")?;
     let vocab_map: BTreeMap<String, u32> = model
         .get("vocab")
@@ -398,6 +630,37 @@ fn write_tokenizer(
         })
         .collect();
     vocab.sort_by_key(|entry| entry.id);
+
+    let special_ids: std::collections::BTreeSet<u32> = tokenizer
+        .get("added_tokens")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .get("special")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        })
+        .filter_map(|entry| entry.get("id").and_then(serde_json::Value::as_u64))
+        .map(|id| id as u32)
+        .collect();
+    let max_token_id = vocab.iter().map(|entry| entry.id).max().unwrap_or(0);
+    let mut decoder_tokens =
+        vec![DecoderToken::default(); max_token_id.saturating_add(1) as usize];
+    for entry in &vocab {
+        decoder_tokens[entry.id as usize] = DecoderToken {
+            token: entry.token.clone(),
+            special: special_ids.contains(&entry.id),
+        };
+    }
+    let decoder_commitment = write_external(
+        &DecoderTable {
+            tokens: decoder_tokens.into(),
+        },
+        "output-finalize",
+        "decoder",
+    )?;
 
     // A merge-less tokenizer (tiny-gemma-dev) leaves this empty, which makes
     // the merge pass a no-op: with no rule to extend a pending piece, every
@@ -466,7 +729,7 @@ fn write_tokenizer(
             &pieces_commitment
         ),
     ));
-    Ok(())
+    Ok(decoder_commitment)
 }
 
 /// Entries per bucket to aim for.
@@ -740,6 +1003,16 @@ fn write_transformer_layers(
     for (donor, borrowers) in &by_donor {
         println!("  donor layer {donor} -> {borrowers:?}");
     }
+    if by_donor.len() > 2 {
+        return Err(format!(
+            "this chain supports at most two KV donor candidates, model declares {}",
+            by_donor.len()
+        )
+        .into());
+    }
+    let mut donor_candidates = by_donor.keys().copied();
+    let donor_a_layer = donor_candidates.next().unwrap_or(-2);
+    let donor_b_layer = donor_candidates.next().unwrap_or(-3);
 
     for layer_idx in 0..shape.layers {
         let at = |suffix: &str| format!("model.language_model.layers.{layer_idx}.{suffix}");
@@ -783,6 +1056,8 @@ fn write_transformer_layers(
                 rotary_dim,
                 rope_freq_base_dim,
                 kv_donor_layer,
+                donor_a_layer,
+                donor_b_layer,
                 norm_input: page_of_i32s(&weights.get(&at("input_layernorm.weight"))?.values),
                 norm_post_attn: page_of_i32s(
                     &weights.get(&at("post_attention_layernorm.weight"))?.values,
@@ -829,14 +1104,21 @@ fn write_transformer_layers(
         } else {
             format!("prefill_range_l{}", layer_idx - 1)
         };
-        // Every stage of this one program shares `main`'s signature, so every
-        // one needs a `donor_kv` binding. A sharing layer takes its donor's
-        // published cache; the rest take `input_embedding`, whose `kv` is empty
-        // and which the tile ignores anyway (`kv_donor_layer < 0`). Binding a
-        // real earlier stage avoids inventing a synthetic empty external.
-        let donor = match shape.kv_donor_layer(layer_idx) {
-            donor if donor >= 0 => format!("prefill_range_l{donor}"),
-            _ => String::from("input_embedding"),
+        // Before the sharing boundary both candidates must be the empty input:
+        // binding the eventual donor stages here would be a forward reference.
+        // Sharing layers receive both candidates and committed
+        // `kv_donor_layer` selects the exact one inside the tile.
+        let first_shared = shape.layers.saturating_sub(shape.num_kv_shared_layers);
+        let (donor_a, donor_b) = if layer_idx < first_shared {
+            (
+                String::from("input_embedding"),
+                String::from("input_embedding"),
+            )
+        } else {
+            (
+                format!("prefill_range_l{donor_a_layer}"),
+                format!("prefill_range_l{donor_b_layer}"),
+            )
         };
         stages.push(format!(
             concat!(
@@ -849,13 +1131,15 @@ fn write_transformer_layers(
                 // for `donor_kv` — a decode stage is where this points at the
                 // previous step instead.
                 "inputs.prior_kv = {{ from = \"input_embedding\" }}\n",
-                "inputs.donor_kv = {{ from = \"{donor}\" }}\n",
+                "inputs.donor_a_kv = {{ from = \"{donor_a}\" }}\n",
+                "inputs.donor_b_kv = {{ from = \"{donor_b}\" }}\n",
                 "inputs.ple = {{ from = \"prefill_prepare_aux_l{idx}\" }}\n",
                 "{line}"
             ),
             idx = layer_idx,
             upstream = upstream,
-            donor = donor,
+            donor_a = donor_a,
+            donor_b = donor_b,
             line = external_line("layer", "prefill-range", &name, &commitment)
         ));
     }

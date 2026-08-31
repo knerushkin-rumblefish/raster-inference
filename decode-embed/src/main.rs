@@ -16,11 +16,12 @@ use decode_embed::*;
 
 /// Phase 7 entrypoint, for one decode step.
 ///
-/// `selected` is bound by the chain to the previous step's `decode_select_token`
-/// (or to the prefill chain's, on the first step); `embedding` is the same
-/// committed external `input_embedding` reads.
+/// `selected` is bound to this iteration's `decode-select-token` output;
+/// `embedding` is the same committed external `input_embedding` reads.
 #[sequence]
-fn main(selected: SelectedToken, embedding: EmbeddingTable) -> Result<ActivationSequence> {
+fn main(selected: DecodeEdge, embedding: EmbeddingTable) -> Result<ActivationSequence> {
+    let has_selected = select!(bool, selected.clone().has_selected);
+    call!(require_selected_token, has_selected)?;
     let token_id = select!(u32, selected.clone().token_id);
     let decode_position = select!(u32, selected.decode_position);
 

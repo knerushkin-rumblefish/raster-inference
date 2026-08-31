@@ -66,7 +66,8 @@ fn attend_token(
     output: RecurSequenceOutput<ActivationSequence>,
     prior_keys: List<KeyRow>,
     keys: List<KeyRow>,
-    donor_keys: List<KeyRow>,
+    donor_a_keys: List<KeyRow>,
+    donor_b_keys: List<KeyRow>,
     params: LayerParams,
     w_o: List<BytesPage>,
     w_gate: List<BytesPage>,
@@ -81,9 +82,10 @@ fn attend_token(
     // softmax once over the whole window, then accumulate the weighted values in
     // `Acc` precision and requantize once.
     //
-    // Each pass sweeps three key lists and exactly one *side* contributes, since
-    // a sequence cannot branch on `kv_donor_layer`: a layer that owns its cache
-    // reads `prior_keys` then `keys`, a sharing layer reads `donor_keys`.
+    // Each pass sweeps the own-cache lists and both committed donor candidates.
+    // Exactly one source contributes: tiles compare the source layer against
+    // the exact `kv_donor_layer` model fact instead of trusting manifest
+    // topology alone.
     //
     // Sweep order is deliberately not load-bearing. Both `score_key` and
     // `accumulate_context` address by `key.position - window_start`, so a key
@@ -91,26 +93,35 @@ fn attend_token(
     // iteration saw it. That is what lets a decode stage's inherited cache be
     // pruned to the window without the scores silently shifting.
     let scores = call!(zero_scores, query.clone(), params.clone());
+    let donor_a_layer = select!(i32, params.clone().donor_a_layer);
+    let donor_b_layer = select!(i32, params.clone().donor_b_layer);
     let scores = call_recur!(
         tile = score_key,
         input = prior_keys.clone(),
         chunk = 64,
         state = scores,
-        args = (query.clone(), params.clone(), false)
+        args = (query.clone(), params.clone(), -1)
     );
     let scores = call_recur!(
         tile = score_key,
         input = keys.clone(),
         chunk = 64,
         state = scores,
-        args = (query.clone(), params.clone(), false)
+        args = (query.clone(), params.clone(), -1)
     );
     let scores = call_recur!(
         tile = score_key,
-        input = donor_keys.clone(),
+        input = donor_a_keys.clone(),
         chunk = 64,
         state = scores,
-        args = (query.clone(), params.clone(), true)
+        args = (query.clone(), params.clone(), donor_a_layer.clone())
+    );
+    let scores = call_recur!(
+        tile = score_key,
+        input = donor_b_keys.clone(),
+        chunk = 64,
+        state = scores,
+        args = (query.clone(), params.clone(), donor_b_layer.clone())
     );
     let weights = call!(softmax_scores, scores, params.clone());
 
@@ -120,21 +131,33 @@ fn attend_token(
         input = prior_keys,
         chunk = 64,
         state = context_acc,
-        args = (query.clone(), weights.clone(), params.clone(), false)
+        args = (query.clone(), weights.clone(), params.clone(), -1)
     );
     let context_acc = call_recur!(
         tile = accumulate_context,
         input = keys.clone(),
         chunk = 64,
         state = context_acc,
-        args = (query.clone(), weights.clone(), params.clone(), false)
+        args = (query.clone(), weights.clone(), params.clone(), -1)
     );
     let context_acc = call_recur!(
         tile = accumulate_context,
-        input = donor_keys,
+        input = donor_a_keys,
         chunk = 64,
         state = context_acc,
-        args = (query.clone(), weights, params.clone(), true)
+        args = (
+            query.clone(),
+            weights.clone(),
+            params.clone(),
+            donor_a_layer
+        )
+    );
+    let context_acc = call_recur!(
+        tile = accumulate_context,
+        input = donor_b_keys,
+        chunk = 64,
+        state = context_acc,
+        args = (query.clone(), weights, params.clone(), donor_b_layer)
     );
     let context = call!(finish_context, context_acc);
     let context_values = call!(packed_values, context.clone());
@@ -222,7 +245,8 @@ fn main(
     activations: ActivationSequence,
     layer: TransformerLayer,
     prior_kv: ActivationSequence,
-    donor_kv: ActivationSequence,
+    donor_a_kv: ActivationSequence,
+    donor_b_kv: ActivationSequence,
     ple: PleLayerInputs,
 ) -> Result<ActivationSequence> {
     let declared_params = select!(LayerParams, layer.clone().params);
@@ -278,10 +302,12 @@ fn main(
     // prefill stage, which binds it to `input_embedding` exactly as the
     // non-sharing layers already bind `donor_kv`.
     let prior_keys = select!(List<KeyRow>, prior_kv.kv);
-    // The donor's published cache. Bound to `input_embedding` (an empty `kv`)
-    // for every layer that computes its own, so the binding is uniform across
-    // all 35 stages of this one program.
-    let donor_keys = select!(List<KeyRow>, donor_kv.kv);
+    // Both candidate donor caches are bound uniformly. Own-cache layers bind
+    // both to the empty `input_embedding`; sharing layers bind the two actual
+    // candidates. The tile accepts only the candidate whose layer number
+    // matches committed `kv_donor_layer`.
+    let donor_a_keys = select!(List<KeyRow>, donor_a_kv.kv);
+    let donor_b_keys = select!(List<KeyRow>, donor_b_kv.kv);
 
     let ple_rows = select!(List<PleRow>, ple.rows);
     let ple_input_gate = select!(List<BytesPage>, layer.clone().ple_input_gate.pages);
@@ -308,7 +334,8 @@ fn main(
         args = (
             prior_keys,
             keys,
-            donor_keys,
+            donor_a_keys,
+            donor_b_keys,
             params,
             w_o,
             w_gate,

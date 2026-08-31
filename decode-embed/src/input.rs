@@ -44,9 +44,12 @@ pub struct EmbeddingTable {
 
 /// The committed input: `decode-select-token`'s authorized output.
 ///
-/// MUST match `SelectedToken` in `decode-select-token` field-for-field.
+/// MUST match `DecodeEdge` in `decode-select-token` field-for-field.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
-pub struct SelectedToken {
+pub struct DecodeEdge {
+    /// False only on `decode-init`'s empty edge, which is never sent to this
+    /// program when the repeat count is zero.
+    pub has_selected: bool,
     /// Absolute position this token occupies — `prompt_len` on the first decode
     /// step, one more on each after. Produced by `prefill-finalize` as
     /// `start_position + token_count`, so it is already absolute and needs no
@@ -54,6 +57,7 @@ pub struct SelectedToken {
     pub decode_position: u32,
     pub token_id: u32,
     pub value: i32,
+    pub generated_token_ids: List<u32>,
 }
 
 /// Loop-carried summary of failed rows: how many, and the first message.

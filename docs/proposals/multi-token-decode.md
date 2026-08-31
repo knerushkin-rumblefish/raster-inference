@@ -1,6 +1,6 @@
 # Proposal: multi-token decode — the generation loop as chain stages
 
-Status: **draft** 2026-08-27. Unowned.
+Status: **implemented** 2026-08-28.
 
 Ports the decode loop of the reference implementation
 (`casettek/raster-inference`, `src/runtime/executors/native.rs:265-450`) onto this chain, using the
@@ -427,12 +427,10 @@ carry **18.9 MB per step**, flat in `t` for 28 of 35 layers.
   just wasteful.
 - **Sampling.** `validate_sampling_config` (`runtime/pipeline.rs:22`) rejects everything but greedy;
   `decode-select-token` matches.
-- **`output_finalize`.** Detokenizing the transcript is one stage after the block, bound to the
-  `transcript` export. It needs the tokenizer external `prompt_prepare` already commits to.
 
 ## 9. Implementation order
 
-Revised 2026-08-28. Steps 1-8 are done; the decode chain runs and matches the reference.
+Revised 2026-08-28. Steps 1-10 are done; the decode chain generates an exact fixed token count.
 
 1. ~~**`chunk = 64` on `score_key` and `accumulate_context`.**~~ **Done.**
 2. ~~**`TokenCursor` + stage-local indexes** (§4.3).~~ **Done.**
@@ -445,11 +443,24 @@ Revised 2026-08-28. Steps 1-8 are done; the decode chain runs and matches the re
    `decode_position` from `token_count` alone, which is the next token's position only when the
    stage starts at zero. A decode stage sees one row and would have reported position 1 forever.
 7. ~~**One decode step against the reference oracle.**~~ **Done** — see below.
-8. ~~**Multi-step generation.**~~ **Done**, but *generated*, not a `[[chain.repeat]]` block: §6's
-   donor binding is still not templatable. `tools/gen_decode_stages.py` reads the donor map out of
-   the prefill wiring `model-import` already resolved. 100 tokens expands to **7,374 stages**, and
-   `chain run --stage decode_select_t99` resolves the whole graph.
-9. **`donor_kv` positional bindings upstream** (§6), then replace the generator with a repeat block.
+8. ~~**Multi-step generation.**~~ **Done.** Each repeat iteration starts with selection and ends
+   with the corresponding transition, so `count = N` means exactly N generated tokens.
+9. ~~**Uniform donor wiring and `[[chain.repeat]]`.**~~ **Done** without positional manifest
+   bindings: both committed donor candidates are bound uniformly and the tile accepts only the
+   exact `kv_donor_layer`.
+10. ~~**Transcript and output finalization.**~~ **Done.** `decode-init` supplies the zero-token
+    fallback, selections append IDs to the carried edge, and `output-finalize` publishes count,
+    IDs, the reference-compatible token-ID SHA-256, decoded text and stop reason.
+
+The `N = 0, 1, 2, 3` unauthenticated gates pass. On the tiny fixture they publish `[]`, `[1]`,
+`[1, 1]` and `[1, 1, 1]`, with positions advancing from 12.
+
+Authenticated chain execution remains blocked upstream by Raster's open
+`docs/issues/authenticated-chain-draft-output.md`: the recorder cannot replay a `ProgramEnd`
+selection stored at a finalized draft coordinate. During this work a separate nested-recur CFS bug
+was fixed—the recorder now resolves `chunk = 64` for a recur tile inside a recur-sequence iteration
+instead of treating the outer iteration as the item—but the run then reaches the known draft-output
+failure. No inference-side sentinel or synthetic sweep should paper over that verifier gap.
 
 ### Parity against the reference (2026-08-28)
 

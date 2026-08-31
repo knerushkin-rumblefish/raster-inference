@@ -1,6 +1,6 @@
 # Issue: `donor-binding-not-templatable` — the KV donor cannot be written as a repeat template
 
-Status: open 2026-08-27. Unowned.
+Status: **closed 2026-08-28** by uniform dual-donor bindings.
 
 Related:
 - **`raster` repo, `docs/proposals/chain-repeat.md`** (implemented 2026-08-27) — supplies the
@@ -50,3 +50,14 @@ layers and leaves the 20 that matter.
   the right call.
 - **Not blocking.** `docs/proposals/multi-token-decode.md` §6 options 2 and 3 both ship today.
   This issue is about deleting a workaround, not unblocking one.
+
+## Resolution
+
+`prefill-range` now takes two donor candidates on every stage. The committed
+`LayerParams.kv_donor_layer` is compared against each candidate's committed
+layer number inside `score_key` and `accumulate_context`; exactly one candidate
+can contribute. Layers before the sharing boundary bind both candidates to the
+empty `input_embedding`, while sharing layers bind the two real donor stages.
+
+That makes the topology uniform enough for `[[chain.repeat]]` without adding
+conditionals, modulus, or a positional lookup table to the manifest language.

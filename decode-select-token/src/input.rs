@@ -43,10 +43,26 @@ pub struct ArgmaxState {
     pub value: i32,
 }
 
-/// The stage's authorized output: the greedily selected next token.
+/// One selected token before it is appended to the generated transcript.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
 pub struct SelectedToken {
     pub decode_position: u32,
     pub token_id: u32,
     pub value: i32,
+}
+
+/// The edge carried between decode iterations.
+///
+/// `decode-init` emits the empty value (`has_selected = false`). Every
+/// `decode-select-token` stage copies the prior transcript, appends exactly one
+/// token, and publishes that token in the scalar fields for `decode-embed`.
+/// Keeping both in one output is necessary because a chain stage has one
+/// authorized output and downstream bindings cannot select a field from it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, raster::Selectable)]
+pub struct DecodeEdge {
+    pub has_selected: bool,
+    pub decode_position: u32,
+    pub token_id: u32,
+    pub value: i32,
+    pub generated_token_ids: List<u32>,
 }

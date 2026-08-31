@@ -2,7 +2,8 @@
 
 A chain project that runs a real Gemma model — `tiny-gemma-dev` from
 `raster-inference` — as a verifiable Raster chain: committed prompt in,
-next-token logits out, one stage per inference phase, expanded per layer.
+exactly N generated token IDs and decoded text out, one stage per inference
+phase, expanded per layer and generated token.
 
 ```sh
 cargo run --manifest-path model-import/Cargo.toml -- \
@@ -23,7 +24,7 @@ cargo raster chain run && cargo raster chain audit --execution
 ```
 
 Every stage that passes activations on shares one type, `ActivationSequence
-{ rows, errors }` — defined field-for-field in each crate, because the chain
+{ rows, errors, kv, start_position }` — defined field-for-field in each crate, because the chain
 links stages by structural commitment. That is what lets `prefill_range`
 instances chain into each other.
 
@@ -386,45 +387,43 @@ cargo raster run --input input.json --input-manifest input_manifest.json \
   --audit commit.bin
 
 # chain (from the repo root)
-cargo raster chain run
-cargo raster chain audit
-cargo raster chain audit --execution
+cargo raster chain run --no-auth
 ```
 
 Any change to a tile body, a sequence, or `main`'s signature changes the
 program identity: rebuild with the risc0 backend and commit the new
 `Raster.lock` together with the source change.
 
-## Generating more than one token
+## Generating N tokens
 
-The chain's decode segment is generated, not hand-written. `Raster.toml.prefill-only`
-holds the 74-stage prefill chain; `tools/gen_decode_stages.py` emits one decode step
-(73 stages: embed, 35 aux, 35 range, finalize, select) against it:
+`model-import` writes a complete manifest whose decode section is one
+`[[chain.repeat]]`. Selection is the first operation in each iteration, so `--tokens N`
+means exactly N selected tokens and N transformer transitions:
 
 ```sh
-cp Raster.toml.prefill-only Raster.toml
-python3 - <<'PY'
-import subprocess, pathlib
-out = [pathlib.Path("Raster.toml").read_text().rstrip() + "\n"]
-for t in range(100):                                   # <- token count
-    out.append(subprocess.run(["python3", "tools/gen_decode_stages.py",
-                               "Raster.toml.prefill-only", str(t)],
-                              capture_output=True, text=True, check=True).stdout)
-pathlib.Path("Raster.toml").write_text("".join(out))
-PY
-cargo raster chain run          # 7,374 stages for 100 tokens
+cargo run --manifest-path model-import/Cargo.toml -- \
+  --model ../casettek/raster-inference/assets/tiny-gemma-dev \
+  --prompt "hello raster" \
+  --tokens 3 \
+  --manifest Raster.toml
+
+cargo raster chain run --no-auth       # fast functional check
 ```
 
-Every external a decode stage binds is one prefill already committed to — the weights
-are a property of the model, not of the step — so the generator reads them back out of
-the prefill manifest rather than re-importing anything.
+The final `output_finalize` stage publishes `generated_token_count`,
+`generated_token_ids`, their reference-compatible SHA-256, decoded text, and
+`stop_reason`. `Raster.toml.prefill-only` is the generated `--tokens 0` boundary
+fixture; it still runs `decode_init` and `output_finalize` so empty generation is
+tested end to end.
 
-**Why generated rather than a `[[chain.repeat]]` block.** Nineteen of the twenty
-KV-sharing layers take their donor by attention type (`l ≡ 4 (mod 5)` borrows layer 14,
-the rest layer 13), and a repeat template has no conditional and no modulus. See
-`docs/issues/donor-binding-not-templatable.md`. The generator reads the donor map out
-of the prefill wiring that `model-import` already resolved, rather than deriving it a
-second time.
+For the 35-layer model, prefill/init/output cost 75 stages once and every generated
+token expands to 73 more stages (`select + embed + 35 aux + 35 range + finalize`).
+The repeat keeps the manifest compact; expansion deliberately keeps every execution
+and audit stage.
+
+KV-sharing layers receive both committed donor candidates. The layer's committed
+`kv_donor_layer` selects the exact candidate inside the tile, which removes the old
+non-templatable donor map and makes a wrong manifest edge fail closed.
 
 **Before you trust the output**, build the guests with the non-default backend —
 `cargo raster build` defaults to `--backend native`, which discovers the tiles and
@@ -433,7 +432,19 @@ run with advice that does not fix it:
 
 ```sh
 for d in prompt-prepare input-embedding prefill-prepare-aux prefill-range \
-         prefill-finalize decode-embed decode-select-token; do
+         prefill-finalize decode-init decode-select-token decode-embed \
+         output-finalize; do
   (cd $d && cargo raster build --backend risc0)
 done
+
+# Functional execution:
+cargo raster chain run --no-auth
 ```
+
+Authenticated chain execution is currently blocked by Raster's open
+`authenticated-chain-draft-output` issue: the recorder cannot replay a
+`ProgramEnd` value finalized from a `Draft` at `[u32::MAX, n]`. This affects
+Raster's own `chain-example`, as well as `decode-init`, `decode-select-token`,
+`decode-embed`, and `output-finalize` here. It fails closed; `--no-auth` output
+and no-auth `chain audit --execution` have been validated, but they are not a
+substitute for the missing authenticated gate.

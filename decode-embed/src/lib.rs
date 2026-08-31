@@ -21,6 +21,18 @@ pub mod input;
 
 use input::*;
 
+/// Refuses to embed the empty edge used for a zero-token generation.
+#[tile(kind = iter, description = "Require a selected decode token")]
+pub fn require_selected_token(has_selected: bool) -> Result<bool> {
+    if has_selected {
+        Ok(has_selected)
+    } else {
+        Err(String::from(
+            "decode-embed received the empty decode edge with no selected token",
+        ))
+    }
+}
+
 /// `token_id * hidden_size * 4` — the byte offset of that row in the table.
 #[tile(kind = iter, description = "Byte offset of an embedding row")]
 pub fn embedding_byte_offset(token_id: u32, hidden_size: u32) -> u64 {

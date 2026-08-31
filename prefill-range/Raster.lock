@@ -1,126 +1,134 @@
 {
   "format": 1,
-  "program_commitment": "829e292f049c6ddf6f27b99d2c32e02bd3bd77454f4b0b6805352e86df275777",
+  "program_commitment": "d1c47e7580f1ff0bb1c14b9da08a7c8e566ddd9459cabdc1e2605b156f7f47bb",
   "tiles": {
     "accumulate_context": {
-      "image_id": "48e8e1dac8c316c60578b4432bf5294814fa448ad9bb5678a3287c321d552bae",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "b8f4ad6103bbc20b5b0c7e6e11aad774f7d555441815971c5ca3162b48e47684",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
-    "advance_position": {
-      "image_id": "510361ba357bc9ef69e3253ca204a9a2aef6f38627baa44620d7edd2a407faa4",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+    "advance_cursor": {
+      "image_id": "607c85d8c2c4f8b00ca82f3eb0d09e4aced470089a23d9011377545f5b9807bc",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "assert_layer_complete": {
-      "image_id": "66adb5ee4bf7c92559714ad87fff0a03dc8e56e5352c476729c7eb36ff809a43",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "cbc1c1bb81d92d4634c809b0f419a20b47f902b4aa608fa468c418fb12a8a9ac",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "assert_matrix_bytes": {
-      "image_id": "04ed0c0a1c65004c6e0861c6c501e09446efd82cc2a5b47d921aeb8f740c2168",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "5bccc69abfbd1c2c93f6409fdf78c531a5a3720ae9b50f1559f51bb3a41f6e85",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "attend_kv_chunk": {
-      "image_id": "dd6fb16b55345a5ae175faab321e675fde7eb7e120cf032b053aa00f22d40cd9",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "230e9fb800e8426547aed15945a9e0e67d97edaae961369661997161db2f8729",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "attn_residual": {
-      "image_id": "faceceac5204d7cbbcd82fc2e49cc841e6cfe59149a0f42e435f40a91f4143f3",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "498a091245d307794bea6f113fa4707381eafa4ca30a76c87091c838936b4f2e",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "begin_attention": {
-      "image_id": "bffccd441583fbd834771822a3d034f0517a16834df2d2ab7bd8329efb7dcd27",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "4087765de247996467833b6f22423abf15500e71281f2c5535634776e3508323",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
+    },
+    "begin_cursor": {
+      "image_id": "a04e6974a9fee84fd699672e53b45c633d6cb623403101265409738a2830c3f6",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
+    },
+    "begin_layer_output": {
+      "image_id": "daaf11fe17c99211733e370e7e80bb0c5899ec14ca82259961a0cf2316a18ece",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "begin_qkv": {
-      "image_id": "73bc0aa6eb98011a53955026e2444cff2bd245c585eab0d2c960b6d15cf05602",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "c668747534ea86a8694e209329d256fb04b4ee0118cdbdf884a406685267b519",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
+    },
+    "carry_cached_key": {
+      "image_id": "ff44e90cda54cf30e818c416d78ba06828a79e4fbdda80f94283de2bd051c13a",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "finish_context": {
-      "image_id": "c2954cced1988578a3d7dcb89d1324425c405bca293ebe2c628256e1acc125f4",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "49fbfaa47dacd2167ccd25be7b5c585ab4acecf9912bba0348a1c25f14debc43",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "finish_layer": {
-      "image_id": "0064cf93090ecf4b639bc301d065a514f5a64d259453fa7a7d4d44596ab7445b",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "37648a29a63cf9782c6dedc95e16310487a5ee7966d876ec932af6795efe297e",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "finish_mlp": {
-      "image_id": "5ad68747e8de3228f0158929f3445c8e97b85d0ddfcbc32328748d68986f115b",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "5c21638b9ce2dfe0c0318cd53b72ac35a62c1a85b1d8388eda23b54dbac48277",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "finish_qkv": {
-      "image_id": "05e90e3c7440022f9536076d5fa832b2dc4aae5551459de6c9fc8c3a95b76321",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "844d011726aa83e586be931b0c0db9b1e2f3aadcd163a96dff3557f4e8347e1c",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "gelu_mul": {
-      "image_id": "e63449096fa9e62dfbdf447de7df2b4756de958755be0e0a3f46a40ee5c2dcb5",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "8194e4c21e9756e59891f0ee8592d4cfc6cbd8ee7bafdb8576e1906c4377cf5e",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "kv_out_len": {
-      "image_id": "1adb966f26a81545b6f82d8e6c43155dea23c6c8864441eb25ded186088a0cc6",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "abca4587a2d558cb5947b748a8da0d1d25550d662a0e8115a2364bf26afd3d61",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "mac_weight_page": {
-      "image_id": "3c40dbc5e7d44238b9f8d5d31981b110784086e4c44319f56e69204c95ae8bcc",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "e95aeed9d8392c32047c347713cd6fe02e30cb3db9395e3767bf8e0e8404ac00",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "packed_values": {
-      "image_id": "4e170c0368917313b4a9320855a60424396f936b3de47b8f4403f172524d32eb",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "04ba859cd70d18ebb21747596f72b3a9e106e5a9a354b02dc20c339ac8dc5ea1",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "ple_gate_mul": {
-      "image_id": "6fc675c716cbe7899caa43b326f0413388d58860cb03630287d1bfe39782488c",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "bd1ee5e6cc9ae7039752289405f222a2d4408b69725177a426e047bf408fa80f",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "pre_ff_norm": {
-      "image_id": "173a0eed325f539bc883d822ba89b51d3fdcee02947dd3140bf0cc1a3f563a80",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "f15e16ba22bb04ae4f8ec3bf73286148ef1cf3e83cc1d3bfbffdf4f113b63145",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "q_out_len": {
-      "image_id": "74eae9e81ca23513ded7a08c78b9215c695b3af5971b967959ae82dd1931fd61",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "1644d942f26bfa297b70e291ad082ca8a0d93f2f09c31946dc4ed8b6265129ef",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "qkv_normed": {
-      "image_id": "6b61169472a06629dea77ece7cf37a267410bc1d361bada123f0a2ac67d4011a",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "533f0381af007d4028feb3e37bfc848604f6f6d6fad12ef9a0ba5223f36d374f",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "score_key": {
-      "image_id": "6c1f75838351d36e93cc1ea5f0b02ea1181cbaae02c34b8701fa1e5b57a39743",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "61f74167332a474fb7a079cd09726ace4b0a143dd86241e9ae47c26ac9503c08",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "softmax_context": {
-      "image_id": "a68a9fd9f1c26732a2fc8370f363ec7399076cffccf976822ece69db394b2ab7",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "d3513f3b668e744b86bbe2e656be5630c9a47078e64ffde8a2f123bbae4953ec",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "softmax_scores": {
-      "image_id": "877f9ae6e39b8ee3779856746ce59a7a8c8a9a34151c1e65a8b7507019db2210",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "f240a06ac3077170237a970fd139c2973625d7a13d825cd4bc6a71c0c2a8fc89",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "summarise_errors": {
-      "image_id": "d0b5bb09dd93c0af08cd6375144e31b5d89658c7fe8d0acea34ce66b82c39822",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "280b874954a81ab22cc98905be84ef604ed9780a05ac05bdaa0ecbc36279093d",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "validate_layer_params": {
-      "image_id": "89a046a0286580b9a682d383acbe03593609caea23ed4b5053bff39eab7ef9df",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "cdfda0e7096db33a466ad6d48c7f0a0e18243b58abe88da4bd928242f513e37f",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "zero_accum": {
-      "image_id": "1e3d540ac1585d2cbc73be2d86639330567b6effba0317f38b03f1a5054272c7",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "0596a69339df173289c61bb428c107548a4a4de2bd3b80136720f134168c3fac",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "zero_attn_state": {
-      "image_id": "6e46d5991f6f742ecca41fd595c19bfc5a77656fb4274876a8da8491b242b362",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "bcd069ab7ef3d35426f985a6a4b3f9edc136c428ca98cc68e14574b91b65daab",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "zero_context": {
-      "image_id": "c61e6feeff1af4bbdd8a2f99440f264d1ea215be0586c7caa56d4067a35a6dd6",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "32d8f25252fe310419f922089d246e5fe26cd3fdee4847196564ea268cd1b737",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     },
     "zero_scores": {
-      "image_id": "85ec14b6f8fbbde3f907b555458665acf4349d128d51af6e65343a300467771b",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
-    },
-    "zero_u32": {
-      "image_id": "a1eae0cac884dee88a2b68d2a4822f78d23173112217359b8ce5ff5234d02695",
-      "source_hash": "93ec53cc91387cb80000000000008a78"
+      "image_id": "fa8c5082768d9766353b761f379b644c81f4847dba66af744a12a2fd61400048",
+      "source_hash": "8cfeb29fde76fefd000000000000a659"
     }
   },
   "toolchain": {
