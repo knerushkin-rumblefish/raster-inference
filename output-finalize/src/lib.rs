@@ -16,11 +16,17 @@ use input::*;
 
 #[tile(kind = iter, description = "Initialize generated output finalization")]
 pub fn begin_finalize_state() -> FinalizeState {
+    initial_finalize_state()
+}
+
+/// The empty state, as a plain function — see [`advance_finalize_state`].
+pub fn initial_finalize_state() -> FinalizeState {
     FinalizeState {
         count: 0,
         json: String::from("["),
         text: String::new(),
         pending_bytes: BytesPage::__from_parts(0, 0, Vec::new()),
+        stopped: false,
     }
 }
 
@@ -58,6 +64,20 @@ pub fn consume_decoder_token(
     token_id: u32,
     token: DecoderToken,
 ) -> FinalizeState {
+    advance_finalize_state(state, token_id, token)
+}
+
+/// The step [`consume_decoder_token`] is, as a plain function.
+///
+/// Called from the tile body, so it is inside that tile's image id and replays
+/// in the guest with it. Split out because a tile can only be entered from a
+/// sequence, and the terminal-token branch is worth pinning with a test rather
+/// than with a chain run long enough for a real model to close its turn.
+pub fn advance_finalize_state(
+    state: FinalizeState,
+    token_id: u32,
+    token: DecoderToken,
+) -> FinalizeState {
     let mut state = state;
     if state.count > 0 {
         state.json.push(',');
@@ -65,6 +85,18 @@ pub fn consume_decoder_token(
     state.json.push_str(&token_id.to_string());
     state.count = state.count.saturating_add(1);
 
+    // Past the end of the answer. The repeat count in the chain manifest is a
+    // static unroll, so decoding runs to it whatever the model emitted; those
+    // ids stay in the transcript and its commitment, but the decoded text ends
+    // where the model ended.
+    if state.stopped {
+        return state;
+    }
+    if token.terminal {
+        flush_pending(&mut state);
+        state.stopped = true;
+        return state;
+    }
     if token.special {
         flush_pending(&mut state);
         return state;
@@ -113,9 +145,11 @@ pub fn begin_generated_output(
         .generated_token_ids_sha256()
         .set(alloc::format!("{digest:x}"));
     output.generated_text().set(state.text);
-    output
-        .stop_reason()
-        .set(String::from("max_new_tokens"));
+    output.stop_reason().set(if state.stopped {
+        String::from("eos")
+    } else {
+        String::from("max_new_tokens")
+    });
     output
 }
 

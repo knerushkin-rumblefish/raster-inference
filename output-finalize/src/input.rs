@@ -21,6 +21,10 @@ pub struct DecodeEdge {
 pub struct DecoderToken {
     pub token: String,
     pub special: bool,
+    /// In the model's `eos_token_id` set. The chain's decode loop is statically
+    /// expanded to a fixed repeat count, so it cannot stop early; this is what
+    /// lets the finalized output report where the answer actually ended.
+    pub terminal: bool,
 }
 
 /// Committed tokenizer data needed by output finalization.
@@ -38,6 +42,10 @@ pub struct FinalizeState {
     pub json: String,
     pub text: String,
     pub pending_bytes: BytesPage,
+    /// Set by the first terminal token. Everything after it is still counted
+    /// and committed — it was generated — but it is not the model's answer, so
+    /// it stops contributing to `text`.
+    pub stopped: bool,
 }
 
 /// Final authorized inference output.
